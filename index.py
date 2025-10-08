@@ -53,19 +53,22 @@ def find_image_path(value, images_dir):
         return None
 
 def replace_text_in_obj(obj, row):
-    """Replace text placeholders inside shape or cell."""
+    """Replace text placeholders inside shape or cell—scans full text."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(obj, "text_frame") and obj.text_frame is not None:
-            for paragraph in obj.text_frame.paragraphs:
-                for run in paragraph.runs:
-                    matches = placeholder_pattern.findall(run.text)
-                    for field in matches:
-                        val = get_value_for_field(row, field)
+            full_text = "".join(run.text for para in obj.text_frame.paragraphs for run in para.runs)
+            matches = placeholder_pattern.findall(full_text)
+            for field in matches:
+                val = get_value_for_field(row, field)
+                # Replace in all runs
+                for para in obj.text_frame.paragraphs:
+                    for run in para.runs:
                         run.text = run.text.replace(f"{{{{{field}}}}}", val)
                         if field.lower() == "link" and val:
                             run.font.color.rgb = RGBColor(0, 0, 255)
                             run.font.underline = True
+            logger.info(f"Replaced {len(matches)} placeholders in shape")
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
@@ -102,24 +105,21 @@ def process_shape(shape, row, images_dir):
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
 
-def copy_slide_full(template_slide, prs):
-    """True duplicate of slide, copying XML for exact {{}} placeholders."""
+def duplicate_slide_exact(prs, template_slide_index):
+    """Exact duplicate of slide using deepcopy on part."""
     try:
-        # Add new slide with template layout
+        template_slide = prs.slides[template_slide_index]
+        # Deep copy the slide part
+        new_slide_part = deepcopy(template_slide.part)
+        # Add the new slide to prs
         new_slide = prs.slides.add_slide(template_slide.slide_layout)
-        # Deep copy the slide's spTree (shapes tree) to clone everything
-        source_tree = template_slide.part.slide.shapes._spTree
-        new_tree = new_slide.part.slide.shapes._spTree
-        # Clone root elements
-        for child in source_tree:
-            cloned_child = deepcopy(child)
-            new_tree.append(cloned_child)
-        # Fix relationships for images/text
+        new_slide.part = new_slide_part
+        # Copy relationships (for images/text)
         new_slide.part.rels = deepcopy(template_slide.part.rels)
-        logger.info("Duplicated slide with full {{}} placeholders via XML clone")
+        logger.info(f"Exact duplicated slide {template_slide_index}")
         return new_slide
     except Exception as e:
-        logger.error(f"Failed to deep copy slide: {str(e)}")
+        logger.error(f"Failed to exact duplicate slide: {str(e)}")
         return None
 
 @app.post("/api/generate")
@@ -181,12 +181,12 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
 
             # Step 1: Duplicate slides BEFORE processing (exact clone with {{}})
             num_rows = len(df)
-            template_slide = prs.slides[0]
+            template_slide_index = 0
             if num_rows > 1:
                 for i in range(1, num_rows):
                     try:
-                        copy_slide_full(template_slide, prs)
-                        logger.info(f"Duplicated slide for row {i} with exact {{}}")
+                        duplicate_slide_exact(prs, template_slide_index)
+                        logger.info(f"Exact duplicated slide for row {i}")
                     except Exception as e:
                         logger.warning(f"Skipped duplicating slide {i}: {str(e)}")
 
