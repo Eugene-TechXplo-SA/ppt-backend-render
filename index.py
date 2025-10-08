@@ -7,7 +7,7 @@ import zipfile
 import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 import re
 import logging
 import io
@@ -94,7 +94,7 @@ def process_shape(shape, row, images_dir):
     try:
         replace_text_in_obj(shape, row)
         replace_images_on_shape(shape, row, images_dir)
-        if shape.shape_type == MSO_SHAPE.TABLE:
+        if shape.shape_type == MSO_SHAPE_TYPE.TABLE:
             for table_row in shape.table.rows:
                 for cell in table_row.cells:
                     replace_text_in_obj(cell, row)
@@ -102,26 +102,26 @@ def process_shape(shape, row, images_dir):
         logger.error(f"Error in process_shape: {str(e)}")
 
 def copy_slide_full(template_slide, prs):
-    """Full slide clone with all placeholders intact."""
+    """Full slide clone with all placeholders intact—duplicate before filling."""
     try:
         # Add new slide with template layout
         new_slide = prs.slides.add_slide(template_slide.slide_layout)
-        # Copy each shape exactly
+        # Copy each shape exactly, focusing on textboxes with {{}}
         for shape in template_slide.shapes:
             try:
-                if shape.shape_type == MSO_SHAPE.TEXT_BOX:
-                    # Recreate textbox with full text content ({{}})
+                if shape.shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
+                    # Recreate textbox with exact content
                     new_shape = new_slide.shapes.add_textbox(shape.left, shape.top, shape.width, shape.height)
                     new_tf = new_shape.text_frame
                     source_tf = shape.text_frame
-                    # Copy paragraphs
+                    # Copy paragraphs with {{}}
                     for para in source_tf.paragraphs:
                         new_para = new_tf.add_paragraph()
-                        new_para.text = para.text  # Copies {{Province}} etc. exactly
+                        new_para.text = para.text  # Copies {{Province}} etc.
                         new_para.alignment = para.alignment
                         new_para.space_after = para.space_after
                         new_para.space_before = para.space_before
-                        # Copy runs (formatting)
+                        # Copy runs with formatting
                         for run in para.runs:
                             new_run = new_para.add_run()
                             new_run.text = run.text  # Ensures {{}} in runs
@@ -129,22 +129,37 @@ def copy_slide_full(template_slide, prs):
                             new_run.font.size = run.font.size
                             new_run.font.bold = run.font.bold
                             new_run.font.italic = run.font.italic
-                            new_run.font.color.rgb = run.font.color.rgb if run.font.color else RGBColor(0, 0, 0)
+                            if run.font.color:
+                                new_run.font.color.rgb = run.font.color.rgb
                             new_run.font.underline = run.font.underline
-                elif shape.shape_type == MSO_SHAPE.PICTURE:
-                    # Copy image
-                    new_slide.shapes.add_picture(shape.image.blob, shape.left, shape.top, width=shape.width, height=shape.height)
-                elif shape.shape_type == MSO_SHAPE.GROUP:
+                elif shape.shape_type == MSO_SHAPE_TYPE.GROUP:
                     # Recurse into groups
                     for sub_shape in shape.shapes:
-                        copy_slide_full(sub_shape, prs)  # Recursive call for sub-shapes
+                        # Call copy on sub-shape
+                        if sub_shape.shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
+                            copy_shape = new_slide.shapes.add_textbox(sub_shape.left, sub_shape.top, sub_shape.width, sub_shape.height)
+                            # Copy sub-text
+                            source_sub = sub_shape.text_frame
+                            new_sub = copy_shape.text_frame
+                            for para in source_sub.paragraphs:
+                                new_para = new_sub.add_paragraph()
+                                new_para.text = para.text  # {{}} copied
+                                for run in para.runs:
+                                    new_run = new_para.add_run()
+                                    new_run.text = run.text
+                elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    # Copy image
+                    try:
+                        new_slide.shapes.add_picture(shape.image.blob, shape.left, shape.top, width=shape.width, height=shape.height)
+                    except:
+                        pass
                 else:
-                    # Basic copy for other shapes
+                    # Basic copy
                     new_shape = new_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
                     if hasattr(shape, 'text_frame') and shape.text_frame:
                         new_shape.text_frame.text = shape.text_frame.text
             except Exception as copy_e:
-                logger.warning(f"Skipped copying shape {shape.shape_type}: {str(copy_e)}")
+                logger.warning(f"Skipped shape {shape.shape_type}: {str(copy_e)}")
         return new_slide
     except Exception as e:
         logger.error(f"Failed to copy slide: {str(e)}")
@@ -160,112 +175,4 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             excel_path = os.path.join(tmpdir, excel_filename)
             ppt_path = os.path.join(tmpdir, ppt_filename)
             images_dir = os.path.join(tmpdir, "images")
-            logger.info(f"Saving files: excel={excel_path}, ppt={ppt_path}")
-
-            # Validate and save files
-            excel_content = await excel.read()
-            if not excel_content:
-                logger.error("Excel file is empty")
-                raise HTTPException(status_code=400, detail="Excel file is empty")
-            with open(excel_path, "wb") as f:
-                f.write(excel_content)
-
-            ppt_content = await ppt.read()
-            if not ppt_content:
-                logger.error("PowerPoint file is empty")
-                raise HTTPException(status_code=400, detail="PowerPoint file is empty")
-            with open(ppt_path, "wb") as f:
-                f.write(ppt_content)
-
-            if images:
-                zip_filename = images.filename or "images.zip"
-                zip_path = os.path.join(tmpdir, zip_filename)
-                zip_content = await images.read()
-                if not zip_content:
-                    logger.error("Images ZIP file is empty")
-                    raise HTTPException(status_code=400, detail="Images ZIP file is empty")
-                with open(zip_path, "wb") as f:
-                    f.write(zip_content)
-                try:
-                    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                        zip_ref.extractall(images_dir)
-                    logger.info(f"Extracted images to: {images_dir}")
-                except zipfile.BadZipFile as e:
-                    logger.warning(f"Invalid ZIP file: {str(e)}")
-                    images_dir = None
-
-            # Load Excel and PowerPoint
-            logger.info("Loading Excel and PowerPoint")
-            try:
-                df = pd.read_excel(excel_path)
-            except Exception as e:
-                logger.error(f"Failed to load Excel: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid Excel file: {str(e)}")
-            try:
-                prs = Presentation(ppt_path)
-            except Exception as e:
-                logger.error(f"Failed to load PowerPoint: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid PowerPoint file: {str(e)}")
-
-            # Auto-duplicate slides if more rows than slides
-            num_rows = len(df)
-            if num_rows > 1:
-                template_slide = prs.slides[0]
-                for i in range(1, num_rows):
-                    try:
-                        new_slide = copy_slide_full(template_slide, prs)
-                        if new_slide:
-                            logger.info(f"Duplicated slide for row {i} with placeholders")
-                    except Exception as e:
-                        logger.warning(f"Skipped duplicating slide {i}: {str(e)}")
-
-            # Process slides (fill data in all slides)
-            logger.info("Processing slides")
-            num_slides = len(prs.slides)
-            for i, row in df.iterrows():
-                if i < num_slides:
-                    slide = prs.slides[i]
-                    for shape in slide.shapes:
-                        process_shape(shape, row, images_dir if images_dir else tmpdir)
-                else:
-                    logger.warning(f"Extra row {i} ignored—no slide")
-                    break
-
-            # Save output
-            output_file = os.path.join(tmpdir, "Client_Presentation.pptx")
-            try:
-                prs.save(output_file)
-                logger.info(f"Saved output to: {output_file}")
-            except Exception as e:
-                logger.error(f"Failed to save PowerPoint: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to save presentation: {str(e)}")
-
-            # Verify output file
-            if not os.path.exists(output_file):
-                logger.error("Output file does not exist")
-                raise HTTPException(status_code=500, detail="Output presentation file is missing")
-            if os.path.getsize(output_file) == 0:
-                logger.error("Output file is empty")
-                raise HTTPException(status_code=500, detail="Output presentation file is empty")
-
-            # Read file for streaming
-            logger.info("Reading output file for streaming")
-            try:
-                with open(output_file, "rb") as f:
-                    file_content = f.read()
-                if not file_content:
-                    logger.error("Output file is empty when read")
-                    raise HTTPException(status_code=500, detail="Output file is empty when read")
-            except Exception as e:
-                logger.error(f"Failed to read output file: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to read output file: {str(e)}")
-
-            logger.info("Returning StreamingResponse")
-            return StreamingResponse(
-                io.BytesIO(file_content),
-                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                headers={"Content-Disposition": "attachment; filename=Client_Presentation.pptx"}
-            )
-        except Exception as e:
-            logger.error(f"Error in /api/generate: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+            logger.info(f"Saving
