@@ -100,48 +100,6 @@ def process_shape(shape, row, images_dir):
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
 
-def add_duplicated_slide(prs, template_slide, row_index):
-    """Add a new slide by recreating the template with exact {{}} text."""
-    try:
-        new_slide = prs.slides.add_slide(template_slide.slide_layout)
-        # Recreate textboxes from template with literal {{}} text
-        for shape in template_slide.shapes:
-            if shape.shape_type == 1:  # TEXT_BOX
-                # Get exact text from template (with {{}})
-                template_text = ""
-                if shape.text_frame:
-                    template_text = "".join(run.text for para in shape.text_frame.paragraphs for run in para.runs)
-                # Add new textbox with template text
-                new_shape = new_slide.shapes.add_textbox(shape.left, shape.top, shape.width, shape.height)
-                new_tf = new_shape.text_frame
-                new_tf.text = template_text  # Literal {{Province}} copied
-                # Copy formatting from first run
-                if shape.text_frame.paragraphs and shape.text_frame.paragraphs[0].runs:
-                    first_run = shape.text_frame.paragraphs[0].runs[0]
-                    new_run = new_tf.paragraphs[0].runs[0]
-                    new_run.font.name = first_run.font.name
-                    new_run.font.size = first_run.font.size
-                    new_run.font.bold = first_run.font.bold
-                    new_run.font.italic = first_run.font.italic
-                    if first_run.font.color:
-                        new_run.font.color.rgb = first_run.font.color.rgb
-                    new_run.font.underline = first_run.font.underline
-            elif shape.shape_type == 17:  # PICTURE
-                try:
-                    new_slide.shapes.add_picture(shape.image.blob, shape.left, shape.top, width=shape.width, height=shape.height)
-                except:
-                    pass
-            else:
-                # Basic copy
-                new_shape = new_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
-                if hasattr(shape, 'text_frame') and shape.text_frame:
-                    new_shape.text_frame.text = shape.text_frame.text
-        logger.info(f"Added duplicated slide for row {row_index} with {{}} text")
-        return new_slide
-    except Exception as e:
-        logger.error(f"Failed to add duplicated slide: {str(e)}")
-        return None
-
 @app.post("/api/generate")
 async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), images: UploadFile = File(None)):
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -199,27 +157,16 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 logger.error(f"Failed to load PowerPoint: {str(e)}")
                 raise HTTPException(status_code=400, detail=f"Invalid PowerPoint file: {str(e)}")
 
-            # Step 1: Duplicate slides BEFORE processing (recreate with exact {{}} text)
-            num_rows = len(df)
-            template_slide = prs.slides[0]
-            for i in range(1, num_rows):
-                try:
-                    add_duplicated_slide(prs, template_slide, i)  # Recreates with {{}} text
-                    logger.info(f"Added duplicated slide for row {i}")
-                except Exception as e:
-                    logger.warning(f"Skipped adding slide {i}: {str(e)}")
-
-            # Step 2: Fill data in ALL slides (now each has {{}} text)
-            logger.info("Filling data in slides")
-            num_slides = len(prs.slides)
+            # Process slides (no duplication—original behavior)
+            logger.info("Processing slides")
+            if len(df) > len(prs.slides):
+                logger.warning("More rows in Excel than slides in template. Extra rows will be ignored.")
             for i, row in df.iterrows():
-                if i < num_slides:
-                    slide = prs.slides[i]
-                    for shape in slide.shapes:
-                        process_shape(shape, row, images_dir if images_dir else tmpdir)
-                else:
-                    logger.warning(f"Extra row {i} ignored—no slide")
+                if i >= len(prs.slides):
                     break
+                slide = prs.slides[i]
+                for shape in slide.shapes:
+                    process_shape(shape, row, images_dir if images_dir else tmpdir)
 
             # Save output
             output_file = os.path.join(tmpdir, "Client_Presentation.pptx")
@@ -245,17 +192,4 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                     file_content = f.read()
                 if not file_content:
                     logger.error("Output file is empty when read")
-                    raise HTTPException(status_code=500, detail="Output file is empty when read")
-            except Exception as e:
-                logger.error(f"Failed to read output file: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to read output file: {str(e)}")
-
-            logger.info("Returning StreamingResponse")
-            return StreamingResponse(
-                io.BytesIO(file_content),
-                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                headers={"Content-Disposition": "attachment; filename=Client_Presentation.pptx"}
-            )
-        except Exception as e:
-            logger.error(f"Error in /api/generate: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+                    raise HTTPException(status_code=500, detail="Output file
