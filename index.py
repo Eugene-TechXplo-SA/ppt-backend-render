@@ -175,4 +175,111 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             excel_path = os.path.join(tmpdir, excel_filename)
             ppt_path = os.path.join(tmpdir, ppt_filename)
             images_dir = os.path.join(tmpdir, "images")
-            logger.info(f"Saving
+            logger.info(f"Saving files: excel={excel_path}, ppt={ppt_path}")
+
+            # Validate and save files
+            excel_content = await excel.read()
+            if not excel_content:
+                logger.error("Excel file is empty")
+                raise HTTPException(status_code=400, detail="Excel file is empty")
+            with open(excel_path, "wb") as f:
+                f.write(excel_content)
+
+            ppt_content = await ppt.read()
+            if not ppt_content:
+                logger.error("PowerPoint file is empty")
+                raise HTTPException(status_code=400, detail="PowerPoint file is empty")
+            with open(ppt_path, "wb") as f:
+                f.write(ppt_content)
+
+            if images:
+                zip_filename = images.filename or "images.zip"
+                zip_path = os.path.join(tmpdir, zip_filename)
+                zip_content = await images.read()
+                if not zip_content:
+                    logger.error("Images ZIP file is empty")
+                    raise HTTPException(status_code=400, detail="Images ZIP file is empty")
+                with open(zip_path, "wb") as f:
+                    f.write(zip_content)
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                        zip_ref.extractall(images_dir)
+                    logger.info(f"Extracted images to: {images_dir}")
+                except zipfile.BadZipFile as e:
+                    logger.warning(f"Invalid ZIP file: {str(e)}")
+                    images_dir = None
+
+            # Load Excel and PowerPoint
+            logger.info("Loading Excel and PowerPoint")
+            try:
+                df = pd.read_excel(excel_path)
+            except Exception as e:
+                logger.error(f"Failed to load Excel: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Invalid Excel file: {str(e)}")
+            try:
+                prs = Presentation(ppt_path)
+            except Exception as e:
+                logger.error(f"Failed to load PowerPoint: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Invalid PowerPoint file: {str(e)}")
+
+            # Step 1: Duplicate slides BEFORE filling data (clones with {{}})
+            num_rows = len(df)
+            template_slide = prs.slides[0]
+            if num_rows > 1:
+                for i in range(1, num_rows):
+                    try:
+                        copy_slide_full(template_slide, prs)  # Clones full slide with {{}}
+                        logger.info(f"Duplicated slide for row {i} with {{}} placeholders")
+                    except Exception as e:
+                        logger.warning(f"Skipped duplicating slide {i}: {str(e)}")
+
+            # Step 2: Fill data in ALL slides (now each has {{}} from clone)
+            logger.info("Processing slides with data")
+            num_slides = len(prs.slides)
+            for i, row in df.iterrows():
+                if i < num_slides:
+                    slide = prs.slides[i]
+                    for shape in slide.shapes:
+                        process_shape(shape, row, images_dir if images_dir else tmpdir)
+                else:
+                    logger.warning(f"Extra row {i} ignored—no slide")
+                    break
+
+            # Save output
+            output_file = os.path.join(tmpdir, "Client_Presentation.pptx")
+            try:
+                prs.save(output_file)
+                logger.info(f"Saved output to: {output_file}")
+            except Exception as e:
+                logger.error(f"Failed to save PowerPoint: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to save presentation: {str(e)}")
+
+            # Verify output file
+            if not os.path.exists(output_file):
+                logger.error("Output file does not exist")
+                raise HTTPException(status_code=500, detail="Output presentation file is missing")
+            if os.path.getsize(output_file) == 0:
+                logger.error("Output file is empty")
+                raise HTTPException(status_code=500, detail="Output presentation file is empty")
+
+            # Read file for streaming
+            logger.info("Reading output file for streaming")
+            try:
+                with open(output_file, "rb") as f:
+                    file_content = f.read()
+                if not file_content:
+                    logger.error("Output file is empty when read")
+                    raise HTTPException(status_code=500, detail="Output file is empty when read")
+            except Exception as e:
+                logger.error(f"Failed to read output file: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to read output file: {str(e)}")
+
+            logger.info("Returning StreamingResponse")
+            return StreamingResponse(
+                io.BytesIO(file_content),
+                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                headers={"Content-Disposition": "attachment; filename=Client_Presentation.pptx"}
+            )
+        except Exception as e:
+            logger.error(f"Error in /api/generate: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
