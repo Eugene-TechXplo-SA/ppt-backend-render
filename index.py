@@ -7,13 +7,14 @@ import zipfile
 import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 import re
 import logging
 import io
-import aiofiles  # Async file I/O for speed
+from copy import deepcopy
 
-# Setup logging (reduced in production)
-logging.basicConfig(level=logging.WARNING)  # Less verbose
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
@@ -94,79 +95,143 @@ def process_shape(shape, row, images_dir):
     try:
         replace_text_in_obj(shape, row)
         replace_images_on_shape(shape, row, images_dir)
-        if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
-            for row_cells in shape.table.rows:
-                for cell in row_cells.cells:
+        if shape.shape_type == MSO_SHAPE_TYPE.TABLE:
+            for table_row in shape.table.rows:
+                for cell in table_row.cells:
                     replace_text_in_obj(cell, row)
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
+
+def copy_slide_full(template_slide, prs):
+    """True duplicate of slide, copying XML for exact {{}} placeholders."""
+    try:
+        # Add new slide with template layout
+        new_slide = prs.slides.add_slide(template_slide.slide_layout)
+        # Deep copy the slide's spTree (shapes tree) to clone everything
+        source_tree = template_slide.part.slide.shapes._spTree
+        new_tree = new_slide.part.slide.shapes._spTree
+        # Clone root elements
+        for child in source_tree:
+            cloned_child = deepcopy(child)
+            new_tree.append(cloned_child)
+        # Fix relationships for images/text
+        new_slide.part.rels = deepcopy(template_slide.part.rels)
+        logger.info("Duplicated slide with full {{}} placeholders via XML clone")
+        return new_slide
+    except Exception as e:
+        logger.error(f"Failed to deep copy slide: {str(e)}")
+        return None
 
 @app.post("/api/generate")
 async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), images: UploadFile = File(None)):
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            # Save uploaded files (async for speed)
+            # Save uploaded files
             excel_filename = excel.filename or "content.xlsx"
             ppt_filename = ppt.filename or "template_client.pptx"
             excel_path = os.path.join(tmpdir, excel_filename)
             ppt_path = os.path.join(tmpdir, ppt_filename)
             images_dir = os.path.join(tmpdir, "images")
+            logger.info(f"Saving files: excel={excel_path}, ppt={ppt_path}")
 
-            # Async save Excel
+            # Validate and save files
             excel_content = await excel.read()
             if not excel_content:
+                logger.error("Excel file is empty")
                 raise HTTPException(status_code=400, detail="Excel file is empty")
-            async with aiofiles.open(excel_path, "wb") as f:
-                await f.write(excel_content)
+            with open(excel_path, "wb") as f:
+                f.write(excel_content)
 
-            # Async save PPT
             ppt_content = await ppt.read()
             if not ppt_content:
+                logger.error("PowerPoint file is empty")
                 raise HTTPException(status_code=400, detail="PowerPoint file is empty")
-            async with aiofiles.open(ppt_path, "wb") as f:
-                await f.write(ppt_content)
+            with open(ppt_path, "wb") as f:
+                f.write(ppt_content)
 
-            # Async save ZIP if present
             if images:
                 zip_filename = images.filename or "images.zip"
                 zip_path = os.path.join(tmpdir, zip_filename)
                 zip_content = await images.read()
                 if not zip_content:
+                    logger.error("Images ZIP file is empty")
                     raise HTTPException(status_code=400, detail="Images ZIP file is empty")
-                async with aiofiles.open(zip_path, "wb") as f:
-                    await f.write(zip_content)
+                with open(zip_path, "wb") as f:
+                    f.write(zip_content)
                 try:
                     with zipfile.ZipFile(zip_path, "r") as zip_ref:
                         zip_ref.extractall(images_dir)
-                except zipfile.BadZipFile:
+                    logger.info(f"Extracted images to: {images_dir}")
+                except zipfile.BadZipFile as e:
+                    logger.warning(f"Invalid ZIP file: {str(e)}")
                     images_dir = None
 
             # Load Excel and PowerPoint
-            df = pd.read_excel(excel_path)
-            prs = Presentation(ppt_path)
+            logger.info("Loading Excel and PowerPoint")
+            try:
+                df = pd.read_excel(excel_path)
+            except Exception as e:
+                logger.error(f"Failed to load Excel: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Invalid Excel file: {str(e)}")
+            try:
+                prs = Presentation(ppt_path)
+            except Exception as e:
+                logger.error(f"Failed to load PowerPoint: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Invalid PowerPoint file: {str(e)}")
 
-            # Process slides (original)
-            if len(df) > len(prs.slides):
-                logger.warning("More rows in Excel than slides in template. Extra rows ignored.")
+            # Step 1: Duplicate slides BEFORE processing (exact clone with {{}})
+            num_rows = len(df)
+            template_slide = prs.slides[0]
+            if num_rows > 1:
+                for i in range(1, num_rows):
+                    try:
+                        copy_slide_full(template_slide, prs)
+                        logger.info(f"Duplicated slide for row {i} with exact {{}}")
+                    except Exception as e:
+                        logger.warning(f"Skipped duplicating slide {i}: {str(e)}")
+
+            # Step 2: Fill data in ALL slides (now each has {{}} from clone)
+            logger.info("Filling data in slides")
+            num_slides = len(prs.slides)
             for i, row in df.iterrows():
-                if i >= len(prs.slides):
+                if i < num_slides:
+                    slide = prs.slides[i]
+                    for shape in slide.shapes:
+                        process_shape(shape, row, images_dir if images_dir else tmpdir)
+                else:
+                    logger.warning(f"Extra row {i} ignored—no slide")
                     break
-                slide = prs.slides[i]
-                for shape in slide.shapes:
-                    process_shape(shape, row, images_dir if images_dir else tmpdir)
 
             # Save output
             output_file = os.path.join(tmpdir, "Client_Presentation.pptx")
-            prs.save(output_file)
+            try:
+                prs.save(output_file)
+                logger.info(f"Saved output to: {output_file}")
+            except Exception as e:
+                logger.error(f"Failed to save PowerPoint: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to save presentation: {str(e)}")
 
             # Verify output file
-            if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
-                raise HTTPException(status_code=500, detail="Output presentation file is missing or empty")
+            if not os.path.exists(output_file):
+                logger.error("Output file does not exist")
+                raise HTTPException(status_code=500, detail="Output presentation file is missing")
+            if os.path.getsize(output_file) == 0:
+                logger.error("Output file is empty")
+                raise HTTPException(status_code=500, detail="Output presentation file is empty")
 
-            # Async read for streaming
-            async with aiofiles.open(output_file, "rb") as f:
-                file_content = await f.read()
+            # Read file for streaming
+            logger.info("Reading output file for streaming")
+            try:
+                with open(output_file, "rb") as f:
+                    file_content = f.read()
+                if not file_content:
+                    logger.error("Output file is empty when read")
+                    raise HTTPException(status_code=500, detail="Output file is empty when read")
+            except Exception as e:
+                logger.error(f"Failed to read output file: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to read output file: {str(e)}")
 
+            logger.info("Returning StreamingResponse")
             return StreamingResponse(
                 io.BytesIO(file_content),
                 media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
