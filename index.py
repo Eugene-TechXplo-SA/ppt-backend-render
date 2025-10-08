@@ -7,11 +7,9 @@ import zipfile
 import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE_TYPE
 import re
 import logging
 import io
-from copy import deepcopy
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -53,22 +51,19 @@ def find_image_path(value, images_dir):
         return None
 
 def replace_text_in_obj(obj, row):
-    """Replace text placeholders inside shape or cell—scans full text."""
+    """Replace text placeholders inside shape or cell."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(obj, "text_frame") and obj.text_frame is not None:
-            full_text = "".join(run.text for para in obj.text_frame.paragraphs for run in para.runs)
-            matches = placeholder_pattern.findall(full_text)
-            for field in matches:
-                val = get_value_for_field(row, field)
-                # Replace in all runs
-                for para in obj.text_frame.paragraphs:
-                    for run in para.runs:
+            for paragraph in obj.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    matches = placeholder_pattern.findall(run.text)
+                    for field in matches:
+                        val = get_value_for_field(row, field)
                         run.text = run.text.replace(f"{{{{{field}}}}}", val)
                         if field.lower() == "link" and val:
                             run.font.color.rgb = RGBColor(0, 0, 255)
                             run.font.underline = True
-            logger.info(f"Replaced {len(matches)} placeholders in shape")
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
@@ -98,28 +93,53 @@ def process_shape(shape, row, images_dir):
     try:
         replace_text_in_obj(shape, row)
         replace_images_on_shape(shape, row, images_dir)
-        if shape.shape_type == MSO_SHAPE_TYPE.TABLE:
-            for table_row in shape.table.rows:
-                for cell in table_row.cells:
+        if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
+            for row_cells in shape.table.rows:
+                for cell in row_cells.cells:
                     replace_text_in_obj(cell, row)
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
 
-def duplicate_slide_exact(prs, template_slide_index):
-    """Exact duplicate of slide using deepcopy on part."""
+def add_duplicated_slide(prs, template_slide, row_index):
+    """Add a new slide by recreating the template with exact {{}} text."""
     try:
-        template_slide = prs.slides[template_slide_index]
-        # Deep copy the slide part
-        new_slide_part = deepcopy(template_slide.part)
-        # Add the new slide to prs
         new_slide = prs.slides.add_slide(template_slide.slide_layout)
-        new_slide.part = new_slide_part
-        # Copy relationships (for images/text)
-        new_slide.part.rels = deepcopy(template_slide.part.rels)
-        logger.info(f"Exact duplicated slide {template_slide_index}")
+        # Recreate textboxes from template with literal {{}} text
+        for shape in template_slide.shapes:
+            if shape.shape_type == 1:  # TEXT_BOX
+                # Get exact text from template (with {{}})
+                template_text = ""
+                if shape.text_frame:
+                    template_text = "".join(run.text for para in shape.text_frame.paragraphs for run in para.runs)
+                # Add new textbox with template text
+                new_shape = new_slide.shapes.add_textbox(shape.left, shape.top, shape.width, shape.height)
+                new_tf = new_shape.text_frame
+                new_tf.text = template_text  # Literal {{Province}} copied
+                # Copy formatting from first run
+                if shape.text_frame.paragraphs and shape.text_frame.paragraphs[0].runs:
+                    first_run = shape.text_frame.paragraphs[0].runs[0]
+                    new_run = new_tf.paragraphs[0].runs[0]
+                    new_run.font.name = first_run.font.name
+                    new_run.font.size = first_run.font.size
+                    new_run.font.bold = first_run.font.bold
+                    new_run.font.italic = first_run.font.italic
+                    if first_run.font.color:
+                        new_run.font.color.rgb = first_run.font.color.rgb
+                    new_run.font.underline = first_run.font.underline
+            elif shape.shape_type == 17:  # PICTURE
+                try:
+                    new_slide.shapes.add_picture(shape.image.blob, shape.left, shape.top, width=shape.width, height=shape.height)
+                except:
+                    pass
+            else:
+                # Basic copy
+                new_shape = new_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
+                if hasattr(shape, 'text_frame') and shape.text_frame:
+                    new_shape.text_frame.text = shape.text_frame.text
+        logger.info(f"Added duplicated slide for row {row_index} with {{}} text")
         return new_slide
     except Exception as e:
-        logger.error(f"Failed to exact duplicate slide: {str(e)}")
+        logger.error(f"Failed to add duplicated slide: {str(e)}")
         return None
 
 @app.post("/api/generate")
@@ -179,18 +199,17 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 logger.error(f"Failed to load PowerPoint: {str(e)}")
                 raise HTTPException(status_code=400, detail=f"Invalid PowerPoint file: {str(e)}")
 
-            # Step 1: Duplicate slides BEFORE processing (exact clone with {{}})
+            # Step 1: Duplicate slides BEFORE processing (recreate with exact {{}} text)
             num_rows = len(df)
-            template_slide_index = 0
-            if num_rows > 1:
-                for i in range(1, num_rows):
-                    try:
-                        duplicate_slide_exact(prs, template_slide_index)
-                        logger.info(f"Exact duplicated slide for row {i}")
-                    except Exception as e:
-                        logger.warning(f"Skipped duplicating slide {i}: {str(e)}")
+            template_slide = prs.slides[0]
+            for i in range(1, num_rows):
+                try:
+                    add_duplicated_slide(prs, template_slide, i)  # Recreates with {{}} text
+                    logger.info(f"Added duplicated slide for row {i}")
+                except Exception as e:
+                    logger.warning(f"Skipped adding slide {i}: {str(e)}")
 
-            # Step 2: Fill data in ALL slides (now each has {{}} from clone)
+            # Step 2: Fill data in ALL slides (now each has {{}} text)
             logger.info("Filling data in slides")
             num_slides = len(prs.slides)
             for i, row in df.iterrows():
