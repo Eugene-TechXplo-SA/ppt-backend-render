@@ -153,23 +153,24 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 raise HTTPException(status_code=400, detail=f"Invalid Excel file: {str(e)}")
             try:
                 prs = Presentation(ppt_path)
-                # Auto-duplicate slides if more rows than slides
-if len(df) > 1 and len(prs.slides) == 1:  # Assume first slide is template
-    template_slide = prs.slides[0]
-    for i in range(1, len(df)):  # Clone for extra rows
-        try:
-            new_slide = prs.slides.add_slide(template_slide.slide_layout)
-            # Copy shapes (basic—add more if needed)
-            for shape in template_slide.shapes:
-                new_shape = new_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
-                if hasattr(shape, 'text_frame') and shape.text_frame:
-                    new_shape.text_frame.text = shape.text_frame.text  # Copy text placeholders
-            logger.info(f"Duplicated slide for row {i}")
-        except Exception as e:
-            logger.warning(f"Skipped duplicating slide: {str(e)}")
             except Exception as e:
                 logger.error(f"Failed to load PowerPoint: {str(e)}")
                 raise HTTPException(status_code=400, detail=f"Invalid PowerPoint file: {str(e)}")
+
+            # Auto-duplicate slides if more rows than slides
+            if len(df) > 1 and len(prs.slides) == 1:  # Assume first slide is template
+                template_slide = prs.slides[0]
+                for i in range(1, len(df)):  # Clone for extra rows
+                    try:
+                        new_slide = prs.slides.add_slide(template_slide.slide_layout)
+                        # Copy shapes (basic—add more if needed)
+                        for shape in template_slide.shapes:
+                            new_shape = new_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
+                            if hasattr(shape, 'text_frame') and shape.text_frame:
+                                new_shape.text_frame.text = shape.text_frame.text  # Copy text placeholders
+                        logger.info(f"Duplicated slide for row {i}")
+                    except Exception as e:
+                        logger.warning(f"Skipped duplicating slide: {str(e)}")
 
             # Process slides
             logger.info("Processing slides")
@@ -219,5 +220,4 @@ if len(df) > 1 and len(prs.slides) == 1:  # Assume first slide is template
             )
         except Exception as e:
             logger.error(f"Error in /api/generate: {str(e)}")
-
             raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
