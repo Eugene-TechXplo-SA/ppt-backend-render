@@ -10,6 +10,7 @@ from pptx.dml.color import RGBColor
 import re
 import logging
 import io
+from copy import deepcopy
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -163,12 +164,35 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 for i in range(1, len(df)):  # Clone for extra rows
                     try:
                         new_slide = prs.slides.add_slide(template_slide.slide_layout)
-                        # Copy shapes (basic—add more if needed)
+                        # Deep copy shapes to preserve placeholders
                         for shape in template_slide.shapes:
-                            new_shape = new_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
-                            if hasattr(shape, 'text_frame') and shape.text_frame:
-                                new_shape.text_frame.text = shape.text_frame.text  # Copy text placeholders
-                        logger.info(f"Duplicated slide for row {i}")
+                            try:
+                                if shape.shape_type == 1:  # TextBox
+                                    new_shape = new_slide.shapes.add_textbox(shape.left, shape.top, shape.width, shape.height)
+                                    if shape.text_frame:
+                                        new_shape.text_frame.text = shape.text_frame.text  # Copy full text with {{}}
+                                        # Copy formatting (runs, paragraphs)
+                                        for para in shape.text_frame.paragraphs:
+                                            new_para = new_shape.text_frame.add_paragraph()
+                                            new_para.text = para.text
+                                            for run in para.runs:
+                                                new_run = new_para.runs[-1]
+                                                new_run.text = run.text
+                                                new_run.font.name = run.font.name
+                                                new_run.font.size = run.font.size
+                                                new_run.font.bold = run.font.bold
+                                                new_run.font.italic = run.font.italic
+                                                new_run.font.color.rgb = run.font.color.rgb if run.font.color else None
+                                elif shape.shape_type == 17:  # Picture (skip or copy if needed)
+                                    pass  # Skip images in template; add later
+                                else:
+                                    # Basic copy for other shapes
+                                    new_shape = new_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
+                                    if shape.text:
+                                        new_shape.text = shape.text
+                            except Exception as copy_e:
+                                logger.warning(f"Skipped copying shape: {str(copy_e)}")
+                        logger.info(f"Duplicated slide for row {i} with placeholders")
                     except Exception as e:
                         logger.warning(f"Skipped duplicating slide: {str(e)}")
 
