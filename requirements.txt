@@ -4,3 +4,4 @@ python-multipart
 pandas
 python-pptx
 openpyxl
+aiofiles
