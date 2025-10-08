@@ -7,10 +7,10 @@ import zipfile
 import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 import re
 import logging
 import io
-from copy import deepcopy
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -94,12 +94,60 @@ def process_shape(shape, row, images_dir):
     try:
         replace_text_in_obj(shape, row)
         replace_images_on_shape(shape, row, images_dir)
-        if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
-            for row_cells in shape.table.rows:
-                for cell in row_cells.cells:
+        if shape.shape_type == MSO_SHAPE_TYPE.TABLE:
+            for table_row in shape.table.rows:
+                for cell in table_row.cells:
                     replace_text_in_obj(cell, row)
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
+
+def copy_slide_with_placeholders(template_slide, target_slide):
+    """Full copy of slide, including text frames with {{}} placeholders."""
+    try:
+        # Copy layout
+        target_slide = target_slide or Presentation().slides.add_slide(template_slide.slide_layout)
+        # Copy all shapes
+        for shape in template_slide.shapes:
+            try:
+                if shape.shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
+                    # Full text box copy with placeholders
+                    new_shape = target_slide.shapes.add_textbox(shape.left, shape.top, shape.width, shape.height)
+                    new_tf = new_shape.text_frame
+                    source_tf = shape.text_frame
+                    # Copy paragraphs and runs exactly
+                    for para in source_tf.paragraphs:
+                        new_para = new_tf.add_paragraph()
+                        new_para.level = para.level
+                        new_para.alignment = para.alignment
+                        new_para.space_after = para.space_after
+                        new_para.space_before = para.space_before
+                        # Copy runs with text ({{}}) and formatting
+                        for run in para.runs:
+                            new_run = new_para.add_run()
+                            new_run.text = run.text  # Copies {{Province}} etc.
+                            new_run.font.name = run.font.name
+                            new_run.font.size = run.font.size
+                            new_run.font.bold = run.font.bold
+                            new_run.font.italic = run.font.italic
+                            new_run.font.color.rgb = run.font.color.rgb if run.font.color else None
+                            new_run.font.underline = run.font.underline
+                elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    # Copy image if present
+                    try:
+                        target_slide.shapes.add_picture(shape.image.blob, shape.left, shape.top, width=shape.width, height=shape.height)
+                    except:
+                        pass
+                else:
+                    # Basic copy for other shapes
+                    new_shape = target_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
+                    if hasattr(shape, 'text_frame') and shape.text_frame:
+                        new_shape.text_frame.text = shape.text_frame.text
+            except Exception as copy_e:
+                logger.warning(f"Skipped copying shape type {shape.shape_type}: {str(copy_e)}")
+        return target_slide
+    except Exception as e:
+        logger.error(f"Failed to copy slide: {str(e)}")
+        return None
 
 @app.post("/api/generate")
 async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), images: UploadFile = File(None)):
@@ -163,35 +211,10 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 template_slide = prs.slides[0]
                 for i in range(1, len(df)):  # Clone for extra rows
                     try:
+                        # Add new slide with template layout
                         new_slide = prs.slides.add_slide(template_slide.slide_layout)
-                        # Deep copy shapes to preserve placeholders
-                        for shape in template_slide.shapes:
-                            try:
-                                if shape.shape_type == 1:  # TextBox
-                                    new_shape = new_slide.shapes.add_textbox(shape.left, shape.top, shape.width, shape.height)
-                                    if shape.text_frame:
-                                        new_shape.text_frame.text = shape.text_frame.text  # Copy full text with {{}}
-                                        # Copy formatting (runs, paragraphs)
-                                        for para in shape.text_frame.paragraphs:
-                                            new_para = new_shape.text_frame.add_paragraph()
-                                            new_para.text = para.text
-                                            for run in para.runs:
-                                                new_run = new_para.runs[-1]
-                                                new_run.text = run.text
-                                                new_run.font.name = run.font.name
-                                                new_run.font.size = run.font.size
-                                                new_run.font.bold = run.font.bold
-                                                new_run.font.italic = run.font.italic
-                                                new_run.font.color.rgb = run.font.color.rgb if run.font.color else None
-                                elif shape.shape_type == 17:  # Picture (skip or copy if needed)
-                                    pass  # Skip images in template; add later
-                                else:
-                                    # Basic copy for other shapes
-                                    new_shape = new_slide.shapes.add_shape(shape.auto_shape_type, shape.left, shape.top, shape.width, shape.height)
-                                    if shape.text:
-                                        new_shape.text = shape.text
-                            except Exception as copy_e:
-                                logger.warning(f"Skipped copying shape: {str(copy_e)}")
+                        # Full copy of slide with placeholders
+                        copy_slide_with_placeholders(template_slide, new_slide)
                         logger.info(f"Duplicated slide for row {i} with placeholders")
                     except Exception as e:
                         logger.warning(f"Skipped duplicating slide: {str(e)}")
