@@ -37,11 +37,13 @@ def get_value_for_field(row, field):
         return ""
 
 def find_image_path(value, images_dir):
-    """Try to resolve image path in images_dir."""
+    """Try to resolve image path in images_dir—strip 'images/' if present."""
     try:
         if not value or not images_dir:
             return None
-        candidate = os.path.join(images_dir, value)
+        # Strip 'images/' prefix if in value (e.g., "images/pic.jpg" -> "pic.jpg")
+        clean_value = value.replace("images/", "", 1) if value.startswith("images/") else value
+        candidate = os.path.join(images_dir, clean_value)
         if os.path.exists(candidate):
             return candidate
         logger.warning(f"Image not found: {candidate}")
@@ -68,35 +70,43 @@ def replace_text_in_obj(obj, row):
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
 def replace_images_on_shape(shape, row, images_dir):
-    """Replace placeholders with images if the value points to a file."""
+    """Replace placeholders with images—loop until no more {{}} for multiple."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(shape, "has_text_frame") and shape.has_text_frame:
-            full_text = "".join(r.text or "" for p in shape.text_frame.paragraphs for r in p.runs)
-            matches = placeholder_pattern.findall(full_text)
-            for field in matches:
-                img_path = find_image_path(get_value_for_field(row, field), images_dir)
-                if img_path:
-                    for p in shape.text_frame.paragraphs:
-                        for r in p.runs:
-                            r.text = r.text.replace(f"{{{{{field}}}}}", "")
-                    left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                    sp = shape._element
-                    sp.getparent().remove(sp)
-                    slide = shape.part.slide
-                    slide.shapes.add_picture(img_path, left, top, width=width, height=height)
+            while True:  # Loop for multiple images in same shape
+                full_text = "".join(r.text or "" for p in shape.text_frame.paragraphs for r in p.runs)
+                matches = placeholder_pattern.findall(full_text)
+                if not matches:
+                    break
+                for field in matches:
+                    img_path = find_image_path(get_value_for_field(row, field), images_dir)
+                    if img_path:
+                        # Remove placeholder text
+                        for p in shape.text_frame.paragraphs:
+                            for r in p.runs:
+                                r.text = r.text.replace(f"{{{{{field}}}}}", "")
+                        # Replace with image
+                        left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                        sp = shape._element
+                        sp.getparent().remove(sp)
+                        slide = shape.part.slide
+                        slide.shapes.add_picture(img_path, left, top, width=width, height=height)
+                        logger.info(f"Added image: {img_path}")
+                        break  # Re-scan after insert
     except Exception as e:
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
 def process_shape(shape, row, images_dir):
-    """Process shapes and tables recursively."""
+    """Process shapes—image first, then text."""
     try:
-        replace_text_in_obj(shape, row)
-        replace_images_on_shape(shape, row, images_dir)
+        replace_images_on_shape(shape, row, images_dir)  # Images first
+        replace_text_in_obj(shape, row)  # Text second
         if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
             for row_cells in shape.table.rows:
                 for cell in row_cells.cells:
-                    replace_text_in_obj(cell, row)
+                    replace_images_on_shape(cell, row, images_dir)  # Images in cells
+                    replace_text_in_obj(cell, row)  # Text in cells
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
 
@@ -160,49 +170,10 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             # Process slides
             logger.info("Processing slides")
             if len(df) > len(prs.slides):
-                logger.warning("More rows in Excel than slides in template. Extra rows ignored.")
+                logger.warning("More rows in Excel than slides in template. Extra rows will be ignored.")
             for i, row in df.iterrows():
                 if i >= len(prs.slides):
                     break
                 slide = prs.slides[i]
                 for shape in slide.shapes:
-                    process_shape(shape, row, images_dir if images_dir else tmpdir)
-
-            # Save output
-            output_file = os.path.join(tmpdir, "Client_Presentation.pptx")
-            try:
-                prs.save(output_file)
-                logger.info(f"Saved output to: {output_file}")
-            except Exception as e:
-                logger.error(f"Failed to save PowerPoint: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to save presentation: {str(e)}")
-
-            # Verify output file
-            if not os.path.exists(output_file):
-                logger.error("Output file does not exist")
-                raise HTTPException(status_code=500, detail="Output presentation file is missing")
-            if os.path.getsize(output_file) == 0:
-                logger.error("Output file is empty")
-                raise HTTPException(status_code=500, detail="Output presentation file is empty")
-
-            # Read file for streaming
-            logger.info("Reading output file for streaming")
-            try:
-                with open(output_file, "rb") as f:
-                    file_content = f.read()
-                if not file_content:
-                    logger.error("Output file is empty when read")
-                    raise HTTPException(status_code=500, detail="Output file is empty when read")
-            except Exception as e:
-                logger.error(f"Failed to read output file: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to read output file: {str(e)}")
-
-            logger.info("Returning StreamingResponse")
-            return StreamingResponse(
-                io.BytesIO(file_content),
-                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                headers={"Content-Disposition": "attachment; filename=Client_Presentation.pptx"}
-            )
-        except Exception as e:
-            logger.error(f"Error in /api/generate: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+                    process_shape(shape,
