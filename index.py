@@ -27,10 +27,11 @@ app.add_middleware(
 )
 
 def get_value_for_field(row, field):
-    """Return a safe string value for a field from Excel."""
+    """Return a safe string value for a field from Excel—trim spaces."""
     try:
         if field in row and not pd.isna(row[field]):
-            return str(row[field])
+            val = str(row[field]).strip()  # Trim spaces for "Site Number "
+            return val
         return ""
     except Exception as e:
         logger.error(f"Error in get_value_for_field for field {field}: {str(e)}")
@@ -91,15 +92,15 @@ def replace_images_on_shape(shape, row, images_dir):
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
 def process_shape(shape, row, images_dir):
-    """Process shapes and tables recursively."""
+    """Process shapes and tables recursively—image first."""
     try:
-        replace_text_in_obj(shape, row)
-        replace_images_on_shape(shape, row, images_dir)
+        replace_images_on_shape(shape, row, images_dir)  # Image first
+        replace_text_in_obj(shape, row)  # Text second
         if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
             for row_cells in shape.table.rows:
                 for cell in row_cells.cells:
-                    replace_text_in_obj(cell, row)
                     replace_images_on_shape(cell, row, images_dir)
+                    replace_text_in_obj(cell, row)
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
 
@@ -140,72 +141,4 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 with open(zip_path, "wb") as f:
                     f.write(zip_content)
                 try:
-                    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                        zip_ref.extractall(images_dir)
-                    logger.info(f"Extracted images to: {images_dir}")
-                except zipfile.BadZipFile as e:
-                    logger.warning(f"Invalid ZIP file: {str(e)}")
-                    images_dir = None
-
-            # Load Excel and PowerPoint
-            logger.info("Loading Excel and PowerPoint")
-            try:
-                df = pd.read_excel(excel_path)
-            except Exception as e:
-                logger.error(f"Failed to load Excel: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid Excel file: {str(e)}")
-            try:
-                prs = Presentation(ppt_path)
-            except Exception as e:
-                logger.error(f"Failed to load PowerPoint: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid PowerPoint file: {str(e)}")
-
-            # Process slides
-            logger.info("Processing slides")
-            if len(df) > len(prs.slides):
-                logger.warning("More rows in Excel than slides in template. Extra rows will be ignored.")
-            for i, row in df.iterrows():
-                if i >= len(prs.slides):
-                    break
-                slide = prs.slides[i]
-                for shape in slide.shapes:
-                    process_shape(shape, row, images_dir if images_dir else tmpdir)
-
-            # Save output
-            output_file = os.path.join(tmpdir, "Client_Presentation.pptx")
-            try:
-                prs.save(output_file)
-                logger.info(f"Saved output to: {output_file}")
-            except Exception as e:
-                logger.error(f"Failed to save PowerPoint: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to save presentation: {str(e)}")
-
-            # Verify output file
-            if not os.path.exists(output_file):
-                logger.error("Output file does not exist")
-                raise HTTPException(status_code=500, detail="Output presentation file is missing")
-            if os.path.getsize(output_file) == 0:
-                logger.error("Output file is empty")
-                raise HTTPException(status_code=500, detail="Output presentation file is empty")
-
-            # Read file for streaming
-            logger.info("Reading output file for streaming")
-            try:
-                with open(output_file, "rb") as f:
-                    file_content = f.read()
-                if not file_content:
-                    logger.error("Output file is empty when read")
-                    raise HTTPException(status_code=500, detail="Output file is empty when read")
-            except Exception as e:
-                logger.error(f"Failed to read output file: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to read output file: {str(e)}")
-
-            logger.info("Returning StreamingResponse")
-            return StreamingResponse(
-                io.BytesIO(file_content),
-                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                headers={"Content-Disposition": "attachment; filename=Client_Presentation.pptx"}
-            )
-        except Exception as e:
-            logger.error(f"Error in /api/generate: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+                    with zipfile.ZipFile(zip_path
