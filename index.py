@@ -37,12 +37,6 @@ def get_value_for_field(row, field):
         logger.error(f"Error in get_value_for_field for {field}: {str(e)}")
         return ""
 
-def is_image_value(val):
-    """Check if value looks like an image path."""
-    if val and isinstance(val, str):
-        return val.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp'))
-    return False
-
 def find_image_path(value, images_dir):
     """Try to resolve image path in images_dir—strip 'images/' if present."""
     try:
@@ -127,15 +121,14 @@ def process_shape(shape, row, images_dir):
         logger.error(f"Error in process_shape: {str(e)}")
 
 @app.post("/api/generate")
-async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(None), images: UploadFile = File(None)):
+async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), images: UploadFile = File(None)):
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             excel_filename = excel.filename or "content.xlsx"
             ppt_filename = ppt.filename or "template_client.pptx"
             excel_path = os.path.join(tmpdir, excel_filename)
             ppt_path = os.path.join(tmpdir, ppt_filename)
-            images_dir = os.path.join(tmpdir, "images")
-            logger.info(f"Saving files: excel={excel_path}, ppt={ppt_path}")
+            images_dir = tmpdir  # Extract to tmpdir for 'images/' paths
 
             excel_content = await excel.read()
             if not excel_content:
@@ -159,8 +152,8 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(None), 
                     f.write(zip_content)
                 try:
                     with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                        zip_ref.extractall(images_dir)
-                    logger.info(f"Extracted images to: {images_dir}")
+                        zip_ref.extractall(tmpdir)  # Extract to tmpdir for 'images/' paths
+                    logger.info(f"Extracted images to: {tmpdir}")
                 except zipfile.BadZipFile as e:
                     logger.warning(f"Invalid ZIP file: {str(e)}")
                     images_dir = None
