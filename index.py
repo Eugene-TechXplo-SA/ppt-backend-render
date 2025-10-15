@@ -38,55 +38,32 @@ def get_value_for_field(row, field):
         return ""
 
 def is_image_value(val):
-    """Check if value looks like an image path."""
+    """Check if value looks like an image path—case-insensitive and flexible."""
     if val and isinstance(val, str):
-        return val.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp'))
+        val = val.strip()
+        logger.debug(f"Checking if {val} is an image")
+        return bool(re.search(r'\.(jpg|jpeg|png|gif|bmp)$', val.lower()))
     return False
 
 def find_image_path(value, images_dir):
-    """Try to resolve image path in images_dir—strip 'images/' if present, handle casing."""
+    """Try to resolve image path in images_dir—handle casing and variants."""
     try:
         if not value or not images_dir:
+            logger.warning(f"No value or images_dir for {value}")
             return None
-        # Strip 'images/' prefix if in value (case-insensitive)
-        clean_value = re.sub(r"(?i)^images/", "", value.strip())
-        # Check in main images_dir
-        candidate = os.path.join(images_dir, clean_value)
-        if os.path.exists(candidate):
-            return candidate
-        # Try capital casing variants
+        clean_value = re.sub(r'(?i)^(?:images/)?', '', value.strip())
+        base_dir = os.path.dirname(images_dir) if os.path.isdir(images_dir) else images_dir
+        logger.debug(f"Searching for {clean_value} in {base_dir}")
         for dir_var in ["images", "Images", "IMAGEs"]:
-            candidate = os.path.join(os.path.dirname(images_dir), dir_var, clean_value)
+            candidate = os.path.join(base_dir, dir_var, clean_value)
             if os.path.exists(candidate):
-                logger.info(f"Found image in variant dir: {candidate}")
+                logger.info(f"Found image: {candidate}")
                 return candidate
-        logger.warning(f"Image not found: {clean_value}")
+        logger.warning(f"Image not found for {value} in {images_dir}")
         return None
     except Exception as e:
         logger.error(f"Error in find_image_path for {value}: {str(e)}")
         return None
-
-def replace_text_in_obj(obj, row):
-    """Replace text placeholders inside shape or cell—case-insensitive match."""
-    placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
-    try:
-        if hasattr(obj, "text_frame") and obj.text_frame is not None:
-            for paragraph in obj.text_frame.paragraphs:
-                for run in paragraph.runs:
-                    matches = placeholder_pattern.findall(run.text)
-                    for field in matches:
-                        field_lower = field.lower().strip()
-                        matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
-                        if matching_col:
-                            val = get_value_for_field(row, matching_col)
-                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
-                            if field_lower == "link" and val:
-                                run.font.color.rgb = RGBColor(0, 0, 255)
-                                run.font.underline = True
-                        else:
-                            logger.warning(f"No matching column for {field}")
-    except Exception as e:
-        logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
 def replace_images_on_shape(shape, row, images_dir):
     """Replace placeholders with images if path exists—case-insensitive."""
@@ -103,30 +80,61 @@ def replace_images_on_shape(shape, row, images_dir):
                     matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
                     if matching_col:
                         img_value = get_value_for_field(row, matching_col)
+                        logger.debug(f"Processing {field} with value {img_value}")
                         if is_image_value(img_value):
                             img_path = find_image_path(img_value, images_dir)
                             if img_path:
+                                logger.info(f"Inserting image for {field} from {img_path}")
                                 for p in shape.text_frame.paragraphs:
                                     for r in p.runs:
                                         r.text = r.text.replace(f"{{{{{field}}}}}", "")
-                                left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                                sp = shape._element
-                                sp.getparent().remove(sp)
-                                slide = shape.part.slide
-                                slide.shapes.add_picture(img_path, left, top, width=width, height=height)
-                                logger.info(f"Inserted image: {img_path}")
-                                replaced = True
-                                break
+                                try:
+                                    left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                                    sp = shape._element
+                                    sp.getparent().remove(sp)
+                                    slide = shape.part.slide
+                                    slide.shapes.add_picture(img_path, left, top, width=width, height=height)
+                                    logger.info(f"Image inserted: {img_path}")
+                                    replaced = True
+                                    break
+                                except Exception as e:
+                                    logger.error(f"Failed to insert image at {img_path}: {str(e)}")
+                            else:
+                                logger.warning(f"No image path found for {field}: {img_value}")
+                        else:
+                            logger.debug(f"{field} value {img_value} not recognized as image")
                     else:
-                        logger.warning(f"No matching column for {field}")
+                        logger.warning(f"No match for {field}")
     except Exception as e:
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
+
+def replace_text_in_obj(obj, row):
+    """Replace remaining text placeholders inside shape or cell—case-insensitive match."""
+    placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
+    try:
+        if hasattr(obj, "text_frame") and obj.text_frame is not None:
+            for paragraph in obj.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    matches = placeholder_pattern.findall(run.text)
+                    for field in matches:
+                        field_lower = field.lower().strip()
+                        matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
+                        if matching_col:
+                            val = get_value_for_field(row, matching_col)
+                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
+                            if field_lower == "link" and val:
+                                run.font.color.rgb = RGBColor(0, 0, 255)
+                                run.font.underline = True
+                        else:
+                            logger.warning(f"No match for {field}")
+    except Exception as e:
+        logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
 def process_shape(shape, row, images_dir):
     """Process shapes—image first, then text."""
     try:
-        replace_images_on_shape(shape, row, images_dir)  # Images first—no text left
-        replace_text_in_obj(shape, row)  # Text second—for non-image fields
+        replace_images_on_shape(shape, row, images_dir)  # Images first
+        replace_text_in_obj(shape, row)  # Text second
         if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
             for row_cells in shape.table.rows:
                 for cell in row_cells.cells:
