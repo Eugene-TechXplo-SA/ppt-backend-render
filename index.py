@@ -11,65 +11,73 @@ import re
 import logging
 import io
 
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # For testing
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 def get_value_for_field(row, field):
+    """Return a safe string value for a field from Excel—trim spaces."""
     try:
         if field in row and not pd.isna(row[field]):
-            return str(row[field]).strip()
+            val = str(row[field]).strip()
+            return val
         return ""
     except Exception as e:
         logger.error(f"Error in get_value_for_field for {field}: {str(e)}")
         return ""
 
 def find_image_path(value, images_dir):
+    """Try to resolve image path in images_dir—handle casing variants."""
     try:
         if not value or not images_dir:
             return None
         clean_value = value.replace("images/", "", 1) if value.startswith("images/") else value
-        candidate = os.path.join(images_dir, clean_value)
-        if os.path.exists(candidate):
-            logger.info(f"Found image: {candidate}")
-            return candidate
-        logger.warning(f"Image not found: {candidate}")
+        for dir_var in [images_dir, os.path.join(tmpdir, "Images"), os.path.join(tmpdir, "IMAGEs")]:
+            candidate = os.path.join(dir_var, clean_value)
+            if os.path.exists(candidate):
+                logger.info(f"Found image path: {candidate}")
+                return candidate
+        logger.warning(f"Image not found for value {value} in {images_dir}")
         return None
     except Exception as e:
         logger.error(f"Error in find_image_path for {value}: {str(e)}")
         return None
 
 def replace_text_in_obj(obj, row):
+    """Replace text placeholders inside shape or cell—case-insensitive match."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(obj, "text_frame") and obj.text_frame is not None:
-            for p in obj.text_frame.paragraphs:
-                for r in p.runs:
-                    matches = placeholder_pattern.findall(r.text)
+            for paragraph in obj.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    matches = placeholder_pattern.findall(run.text)
                     for field in matches:
                         field_lower = field.lower().strip()
                         matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
                         if matching_col:
                             val = get_value_for_field(row, matching_col)
-                            r.text = r.text.replace(f"{{{{{field}}}}}", val)
+                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
                             if field_lower == "link" and val:
-                                r.font.color.rgb = RGBColor(0, 0, 255)
-                                r.font.underline = True
+                                run.font.color.rgb = RGBColor(0, 0, 255)
+                                run.font.underline = True
                         else:
                             logger.warning(f"No match for {field}")
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
 def replace_images_on_shape(shape, row, images_dir):
+    """Replace all placeholders with images if path exists—case-insensitive."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(shape, "has_text_frame") and shape.has_text_frame:
@@ -85,6 +93,7 @@ def replace_images_on_shape(shape, row, images_dir):
                         img_value = get_value_for_field(row, matching_col)
                         img_path = find_image_path(img_value, images_dir)
                         if img_path:
+                            logger.info(f"Attempting to insert image for {field} with path {img_path}")
                             for p in shape.text_frame.paragraphs:
                                 for r in p.runs:
                                     r.text = r.text.replace(f"{{{{{field}}}}}", "")
@@ -93,23 +102,26 @@ def replace_images_on_shape(shape, row, images_dir):
                             sp.getparent().remove(sp)
                             slide = shape.part.slide
                             slide.shapes.add_picture(img_path, left, top, width=width, height=height)
-                            logger.info(f"Inserted: {img_path}")
+                            logger.info(f"Successfully inserted image: {img_path}")
                             replaced = True
                             break
+                        else:
+                            logger.warning(f"No image found for {field} with value {img_value}")
                     else:
-                        logger.warning(f"No match for image {field}")
+                        logger.warning(f"No matching column for {field}")
     except Exception as e:
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
 def process_shape(shape, row, images_dir):
+    """Process shapes—image first, then text."""
     try:
-        replace_images_on_shape(shape, row, images_dir)
-        replace_text_in_obj(shape, row)
-        if hasattr(shape, "shape_type") and shape.shape_type == 19:
-            for r in shape.table.rows:
-                for c in r.cells:
-                    replace_images_on_shape(c, row, images_dir)
-                    replace_text_in_obj(c, row)
+        replace_images_on_shape(shape, row, images_dir)  # Images first
+        replace_text_in_obj(shape, row)  # Text second
+        if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
+            for row_cells in shape.table.rows:
+                for cell in row_cells.cells:
+                    replace_images_on_shape(cell, row, images_dir)
+                    replace_text_in_obj(cell, row)
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
 
@@ -122,17 +134,17 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             excel_path = os.path.join(tmpdir, excel_filename)
             ppt_path = os.path.join(tmpdir, ppt_filename)
             images_dir = os.path.join(tmpdir, "images")
-            logger.info(f"Saving: excel={excel_path}, ppt={ppt_path}")
+            logger.info(f"Saving files: excel={excel_path}, ppt={ppt_path}")
 
             excel_content = await excel.read()
             if not excel_content:
-                raise HTTPException(status_code=400, detail="Excel empty")
+                raise HTTPException(status_code=400, detail="Excel file is empty")
             with open(excel_path, "wb") as f:
                 f.write(excel_content)
 
             ppt_content = await ppt.read()
             if not ppt_content:
-                raise HTTPException(status_code=400, detail="PPT empty")
+                raise HTTPException(status_code=400, detail="PowerPoint file is empty")
             with open(ppt_path, "wb") as f:
                 f.write(ppt_content)
 
@@ -141,32 +153,32 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 zip_path = os.path.join(tmpdir, zip_filename)
                 zip_content = await images.read()
                 if not zip_content:
-                    raise HTTPException(status_code=400, detail="ZIP empty")
+                    raise HTTPException(status_code=400, detail="Images ZIP file is empty")
                 with open(zip_path, "wb") as f:
                     f.write(zip_content)
                 try:
                     with zipfile.ZipFile(zip_path, "r") as zip_ref:
                         zip_ref.extractall(images_dir)
-                    logger.info(f"Extracted to: {images_dir}")
+                    logger.info(f"Extracted images to: {images_dir}")
                 except zipfile.BadZipFile as e:
-                    logger.warning(f"Invalid ZIP: {str(e)}")
+                    logger.warning(f"Invalid ZIP file: {str(e)}")
                     images_dir = None
 
-            logger.info("Loading files")
+            logger.info("Loading Excel and PowerPoint")
             try:
                 df = pd.read_excel(excel_path)
             except Exception as e:
-                logger.error(f"Excel load failed: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid Excel: {str(e)}")
+                logger.error(f"Failed to load Excel: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Invalid Excel file: {str(e)}")
             try:
                 prs = Presentation(ppt_path)
             except Exception as e:
-                logger.error(f"PPT load failed: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid PPT: {str(e)}")
+                logger.error(f"Failed to load PowerPoint: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Invalid PowerPoint file: {str(e)}")
 
-            logger.info("Processing")
+            logger.info("Processing slides")
             if len(df) > len(prs.slides):
-                logger.warning("Extra Excel rows ignored")
+                logger.warning("More rows in Excel than slides in template. Extra rows will be ignored.")
             for i, row in df.iterrows():
                 if i >= len(prs.slides):
                     break
@@ -177,35 +189,35 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             output_file = os.path.join(tmpdir, "Client_Presentation.pptx")
             try:
                 prs.save(output_file)
-                logger.info(f"Saved to: {output_file}")
+                logger.info(f"Saved output to: {output_file}")
             except Exception as e:
-                logger.error(f"Save failed: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Save failed: {str(e)}")
+                logger.error(f"Failed to save PowerPoint: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to save presentation: {str(e)}")
 
             if not os.path.exists(output_file):
-                logger.error("Output missing")
-                raise HTTPException(status_code=500, detail="Output missing")
+                logger.error("Output file does not exist")
+                raise HTTPException(status_code=500, detail="Output presentation file is missing")
             if os.path.getsize(output_file) == 0:
-                logger.error("Output empty")
-                raise HTTPException(status_code=500, detail="Output empty")
+                logger.error("Output file is empty")
+                raise HTTPException(status_code=500, detail="Output presentation file is empty")
 
-            logger.info("Reading output")
+            logger.info("Reading output file for streaming")
             try:
                 with open(output_file, "rb") as f:
                     file_content = f.read()
                 if not file_content:
-                    logger.error("Output read empty")
-                    raise HTTPException(status_code=500, detail="Output read empty")
+                    logger.error("Output file is empty when read")
+                    raise HTTPException(status_code=500, detail="Output file is empty when read")
             except Exception as e:
-                logger.error(f"Read failed: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Read failed: {str(e)}")
+                logger.error(f"Failed to read output file: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to read output file: {str(e)}")
 
-            logger.info("Returning response")
+            logger.info("Returning StreamingResponse")
             return StreamingResponse(
                 io.BytesIO(file_content),
                 media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 headers={"Content-Disposition": "attachment; filename=Client_Presentation.pptx"}
             )
         except Exception as e:
-            logger.error(f"Generate failed: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+            logger.error(f"Error in /api/generate: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
