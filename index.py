@@ -177,4 +177,35 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 prs.save(output_file)
                 logger.info(f"Saved output to: {output_file}")
             except Exception as e:
-                logger.error(f"Failed
+                logger.error(f"Failed to save PowerPoint: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to save presentation: {str(e)}")
+
+            # Verify output file
+            if not os.path.exists(output_file):
+                logger.error("Output file does not exist")
+                raise HTTPException(status_code=500, detail="Output presentation file is missing")
+            if os.path.getsize(output_file) == 0:
+                logger.error("Output file is empty")
+                raise HTTPException(status_code=500, detail="Output presentation file is empty")
+
+            # Read file for streaming
+            logger.info("Reading output file for streaming")
+            try:
+                with open(output_file, "rb") as f:
+                    file_content = f.read()
+                if not file_content:
+                    logger.error("Output file is empty when read")
+                    raise HTTPException(status_code=500, detail="Output file is empty when read")
+            except Exception as e:
+                logger.error(f"Failed to read output file: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to read output file: {str(e)}")
+
+            logger.info("Returning StreamingResponse")
+            return StreamingResponse(
+                io.BytesIO(file_content),
+                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                headers={"Content-Disposition": "attachment; filename=Client_Presentation.pptx"}
+            )
+        except Exception as e:
+            logger.error(f"Error in /api/generate: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
