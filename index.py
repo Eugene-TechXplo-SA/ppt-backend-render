@@ -145,7 +145,7 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             if not ppt_content:
                 raise HTTPException(status_code=400, detail="PowerPoint file is empty")
             with open(ppt_path, "wb") as f:
-                f.write(pct_content)
+                f.write(ppt_content)  # Fixed typo from pct_content to ppt_content
 
             if images:
                 zip_filename = images.filename or "images.zip"
