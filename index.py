@@ -38,13 +38,13 @@ def get_value_for_field(row, field):
         return ""
 
 def is_image_value(val):
-    """Check if value looks like an image path—expanded extensions."""
+    """Check if value looks like an image path—expanded extensions, case-insensitive."""
     if val and isinstance(val, str):
         return bool(re.search(r'\.(jpg|jpeg|png|gif|bmp|svg|tiff|webp)$', val.lower()))
     return False
 
 def find_image_path(value, images_dir):
-    """Try to resolve image path in images_dir—handle casing variants."""
+    """Try to resolve image path in images_dir—handle casing and variants."""
     try:
         if not value or not images_dir:
             logger.warning(f"No value or images_dir for {value}")
@@ -86,7 +86,7 @@ def replace_text_in_obj(obj, row):
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
 def replace_images_on_shape(shape, row, images_dir):
-    """Replace placeholders with images—case-insensitive, no 'image' filter."""
+    """Replace placeholders with images if path exists—case-insensitive."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(shape, "has_text_frame") and shape.has_text_frame:
@@ -106,49 +106,21 @@ def replace_images_on_shape(shape, row, images_dir):
                                 logger.info(f"Inserting image for {field} from {img_path}")
                                 for p in shape.text_frame.paragraphs:
                                     for r in p.runs:
-                                        r.text = r.text.replace(f"{{{{{field}}}}}", "")  # Clear placeholder
-                                try:
-                                    left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                                    sp = shape._element
-                                    sp.getparent().remove(sp)
-                                    slide = shape.part.slide
-                                    slide.shapes.add_picture(img_path, left, top, width=width, height=height)
-                                    logger.info(f"Image inserted: {img_path}")
-                                    replaced = True
-                                    break
-                                except Exception as e:
-                                    logger.error(f"Failed to insert image at {img_path}: {str(e)}")
-                                    # Fallback: Clear text if insertion fails
-                                    for p in shape.text_frame.paragraphs:
-                                        p.text = ""
-                            else:
-                                logger.warning(f"No image path found for {field}: {img_value}")
+                                        r.text = r.text.replace(f"{{{{{field}}}}}", "")
+                                left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                                sp = shape._element
+                                sp.getparent().remove(sp)
+                                slide = shape.part.slide
+                                slide.shapes.add_picture(img_path, left, top, width=width, height=height)
+                                logger.info(f"Image inserted: {img_path}")
+                                replaced = True
+                                break
+                        else:
+                            logger.warning(f"No image value for {field}: {img_value}")
                     else:
                         logger.warning(f"No matching column for {field}")
     except Exception as e:
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
-
-def replace_text_in_obj(obj, row):
-    """Replace remaining text placeholders inside shape or cell—case-insensitive match."""
-    placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
-    try:
-        if hasattr(obj, "text_frame") and obj.text_frame is not None:
-            for paragraph in obj.text_frame.paragraphs:
-                for run in paragraph.runs:
-                    matches = placeholder_pattern.findall(run.text)
-                    for field in matches:
-                        field_lower = field.lower().strip()
-                        matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
-                        if matching_col:
-                            val = get_value_for_field(row, matching_col)
-                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
-                            if field_lower == "link" and val:
-                                run.font.color.rgb = RGBColor(0, 0, 255)
-                                run.font.underline = True
-                        else:
-                            logger.warning(f"No match for {field}")
-    except Exception as e:
-        logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
 def process_shape(shape, row, images_dir):
     """Process shapes—image first, then text."""
