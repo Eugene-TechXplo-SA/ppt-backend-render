@@ -30,11 +30,11 @@ def get_value_for_field(row, field):
     """Return a safe string value for a field from Excel—trim spaces."""
     try:
         if field in row and not pd.isna(row[field]):
-            val = str(row[field]).strip()
+            val = str(row[field]).strip()  # Trim spaces for "Site Number "
             return val
         return ""
     except Exception as e:
-        logger.error(f"Error in get_value_for_field for {field}: {str(e)}")
+        logger.error(f"Error in get_value_for_field for field {field}: {str(e)}")
         return ""
 
 def find_image_path(value, images_dir):
@@ -52,66 +52,42 @@ def find_image_path(value, images_dir):
         logger.error(f"Error in find_image_path for {value}: {str(e)}")
         return None
 
-def replace_text_in_obj(obj, row):
-    """Replace text placeholders inside shape or cell—case-insensitive match."""
-    placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
-    try:
-        if hasattr(obj, "text_frame") and obj.text_frame is not None:
-            for paragraph in obj.text_frame.paragraphs:
-                for run in paragraph.runs:
-                    matches = placeholder_pattern.findall(run.text)
-                    for field in matches:
-                        field_lower = field.lower().strip()
-                        matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
-                        if matching_col:
-                            val = get_value_for_field(row, matching_col)
-                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
-                            if field_lower == "link" and val:
-                                run.font.color.rgb = RGBColor(0, 0, 255)
-                                run.font.underline = True
-                        else:
-                            logger.warning(f"No matching column for {field}")
-    except Exception as e:
-        logger.error(f"Error in replace_text_in_obj: {str(e)}")
-
 def replace_images_on_shape(shape, row, images_dir):
     """Replace placeholders with images if the value is a path."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(shape, "has_text_frame") and shape.has_text_frame:
-            full_text = "".join(r.text or "" for p in shape.text_frame.paragraphs for r in p.runs)
-            matches = placeholder_pattern.findall(full_text)
-            for field in matches:
-                field_lower = field.lower().strip()
-                matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
-                if matching_col:
-                    img_value = get_value_for_field(row, matching_col)
-                    if img_value and is_image_value(img_value):
-                        img_path = find_image_path(img_value, images_dir)
-                        if img_path:
-                            for p in shape.text_frame.paragraphs:
-                                for r in p.runs:
-                                    r.text = r.text.replace(f"{{{{{field}}}}}", "")
-                            left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                            sp = shape._element
-                            sp.getparent().remove(sp)
-                            slide = shape.part.slide
-                            slide.shapes.add_picture(img_path, left, top, width=width, height=height)
-                            logger.info(f"Inserted image: {img_path}")
-                            return  # Exit after insertion to avoid multiple
+            replaced = True
+            while replaced:
+                replaced = False
+                full_text = "".join(r.text or "" for p in shape.text_frame.paragraphs for r in p.runs)
+                matches = placeholder_pattern.findall(full_text)
+                for field in matches:
+                    val = get_value_for_field(row, field)
+                    img_path = find_image_path(val, images_dir)
+                    if img_path:
+                        for p in shape.text_frame.paragraphs:
+                            for r in p.runs:
+                                r.text = r.text.replace(f"{{{{{field}}}}}", "")
+                        left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                        sp = shape._element
+                        sp.getparent().remove(sp)
+                        slide = shape.part.slide
+                        slide.shapes.add_picture(img_path, left, top, width=width, height=height)
+                        logger.info(f"Inserted image: {img_path}")
+                        replaced = True
+                        break
     except Exception as e:
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
 def process_shape(shape, row, images_dir):
-    """Process shapes and tables recursively."""
+    """Process shapes and tables recursively—images only."""
     try:
-        replace_images_on_shape(shape, row, images_dir)  # Images first
-        replace_text_in_obj(shape, row)  # Text second
+        replace_images_on_shape(shape, row, images_dir)  # Only images
         if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
             for row_cells in shape.table.rows:
                 for cell in row_cells.cells:
                     replace_images_on_shape(cell, row, images_dir)
-                    replace_text_in_obj(cell, row)
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
 
