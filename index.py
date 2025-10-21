@@ -102,12 +102,12 @@ def replace_text_in_obj(obj, row):
                     for field in matches:
                         field_lower = field.lower().strip()
                         matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
-                        if matching_col:
+                        if matching_col and not is_image_path(get_value_for_field(row, matching_col)):
                             val = get_value_for_field(row, matching_col)
                             run.text = run.text.replace(f"{{{{{field}}}}}", val)
                             logger.info(f"Replaced {field} with text: {val}")
                         else:
-                            logger.warning(f"No matching column for {field}")
+                            logger.debug(f"Skipped {field} for text replacement (possible image or no match)")
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
@@ -145,7 +145,7 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             if not ppt_content:
                 raise HTTPException(status_code=400, detail="PowerPoint file is empty")
             with open(ppt_path, "wb") as f:
-                f.write(ppt_content)  # Fixed typo from pct_content to ppt_content
+                f.write(ppt_content)
 
             if images:
                 zip_filename = images.filename or "images.zip"
