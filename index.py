@@ -87,18 +87,40 @@ def replace_images_on_shape(shape, row, images_dir):
                     else:
                         logger.error(f"Failed to find image path for {field}: {val}")
                 else:
-                    logger.warning(f"Value for {field} ({val}) not recognized as image path")
+                    logger.debug(f"Value for {field} ({val}) not an image path, skipping for image")
     except Exception as e:
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
-def process_shape(shape, row, images_dir):
-    """Process shapes—images only."""
+def replace_text_in_obj(obj, row):
+    """Replace remaining placeholders with text—case-insensitive match."""
+    placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
-        replace_images_on_shape(shape, row, images_dir)
+        if hasattr(obj, "text_frame") and obj.text_frame is not None:
+            for paragraph in obj.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    matches = placeholder_pattern.findall(run.text)
+                    for field in matches:
+                        field_lower = field.lower().strip()
+                        matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
+                        if matching_col:
+                            val = get_value_for_field(row, matching_col)
+                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
+                            logger.info(f"Replaced {field} with text: {val}")
+                        else:
+                            logger.warning(f"No matching column for {field}")
+    except Exception as e:
+        logger.error(f"Error in replace_text_in_obj: {str(e)}")
+
+def process_shape(shape, row, images_dir):
+    """Process shapes—images first, then text."""
+    try:
+        replace_images_on_shape(shape, row, images_dir)  # Images first
+        replace_text_in_obj(shape, row)  # Text second for remaining placeholders
         if hasattr(shape, "shape_type") and shape.shape_type == 19:  # TABLE
             for row_cells in shape.table.rows:
                 for cell in row_cells.cells:
                     replace_images_on_shape(cell, row, images_dir)
+                    replace_text_in_obj(cell, row)
     except Exception as e:
         logger.error(f"Error in process_shape: {str(e)}")
 
@@ -123,7 +145,7 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             if not ppt_content:
                 raise HTTPException(status_code=400, detail="PowerPoint file is empty")
             with open(ppt_path, "wb") as f:
-                f.write(ppt_content)
+                f.write(pct_content)
 
             if images:
                 zip_filename = images.filename or "images.zip"
