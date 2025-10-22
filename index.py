@@ -55,6 +55,13 @@ def find_image_path(value, images_dir):
         if os.path.exists(candidate):
             logger.info(f"Found image: {candidate}")
             return candidate
+        # Try case-insensitive search as a fallback
+        for root, _, files in os.walk(images_dir):
+            for file in files:
+                if file.lower() == clean_value.lower():
+                    full_path = os.path.join(root, file)
+                    logger.info(f"Found case-insensitive match: {full_path}")
+                    return full_path
         logger.warning(f"Image not found: {candidate}")
         return None
     except Exception as e:
@@ -140,9 +147,12 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                     with zipfile.ZipFile(zip_path, "r") as zip_ref:
                         zip_ref.extractall(images_dir)
                     logger.info(f"Extracted images to: {images_dir}")
+                    # Log extracted files for debugging
+                    extracted_files = [f.filename for f in zip_ref.infolist()]
+                    logger.info(f"Extracted files: {extracted_files}")
                 except zipfile.BadZipFile as e:
-                    logger.warning(f"Invalid ZIP file: {str(e)}")
-                    images_dir = None
+                    logger.error(f"Invalid ZIP file: {str(e)}")
+                    raise HTTPException(status_code=400, detail=f"Invalid ZIP file: {str(e)}")
 
             logger.info("Loading Excel and PowerPoint")
             try:
