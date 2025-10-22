@@ -157,6 +157,8 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             logger.info("Loading Excel and PowerPoint")
             try:
                 df = pd.read_excel(excel_path)
+                # Trim column names to handle trailing spaces
+                df.columns = [col.strip() for col in df.columns]
             except Exception as e:
                 logger.error(f"Failed to load Excel: {str(e)}")
                 raise HTTPException(status_code=400, detail=f"Invalid Excel file: {str(e)}")
