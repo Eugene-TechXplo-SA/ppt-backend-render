@@ -6,9 +6,11 @@ import os
 import zipfile
 import pandas as pd
 from pptx import Presentation
+from pptx.dml.color import RGBColor
 import re
 import logging
 import io
+from urllib.parse import urlparse
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -97,7 +99,7 @@ def replace_images_on_shape(shape, row, images_dir):
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
 def replace_text_in_obj(obj, row):
-    """Replace remaining placeholders with text—case-insensitive match."""
+    """Replace placeholders with text, handling links specially."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(obj, "text_frame") and obj.text_frame is not None:
@@ -107,8 +109,23 @@ def replace_text_in_obj(obj, row):
                     for field in matches:
                         val = get_value_for_field(row, field)
                         if not is_image_path(val):  # Skip if it’s an image path
-                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
-                            logger.info(f"Replaced {field} with text: {val}")
+                            if val and field.lower().endswith("link"):  # Handle links
+                                try:
+                                    result = urlparse(val)
+                                    if all([result.scheme, result.netloc]):  # Valid URL
+                                        run.text = run.text.replace(f"{{{{{field}}}}}", val)
+                                        run.font.color.rgb = RGBColor(0, 0, 255)  # Blue
+                                        run.font.underline = True  # Underline
+                                        logger.info(f"Replaced {field} with hyperlink: {val}")
+                                    else:
+                                        run.text = run.text.replace(f"{{{{{field}}}}}", val)
+                                        logger.warning(f"Invalid URL for {field}: {val}")
+                                except ValueError:
+                                    run.text = run.text.replace(f"{{{{{field}}}}}", val)
+                                    logger.warning(f"Invalid URL format for {field}: {val}")
+                            else:
+                                run.text = run.text.replace(f"{{{{{field}}}}}", val)
+                                logger.info(f"Replaced {field} with text: {val}")
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
@@ -147,7 +164,6 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                     with zipfile.ZipFile(zip_path, "r") as zip_ref:
                         zip_ref.extractall(images_dir)
                     logger.info(f"Extracted images to: {images_dir}")
-                    # Log extracted files for debugging
                     extracted_files = [f.filename for f in zip_ref.infolist()]
                     logger.info(f"Extracted files: {extracted_files}")
                 except zipfile.BadZipFile as e:
