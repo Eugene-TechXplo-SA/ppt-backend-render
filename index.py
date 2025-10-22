@@ -99,7 +99,7 @@ def replace_images_on_shape(shape, row, images_dir):
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
 def replace_text_in_obj(obj, row):
-    """Replace placeholders with text, handling links specially."""
+    """Replace placeholders with text, handling links and case-insensitive matching."""
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     try:
         if hasattr(obj, "text_frame") and obj.text_frame is not None:
@@ -109,23 +109,29 @@ def replace_text_in_obj(obj, row):
                     for field in matches:
                         val = get_value_for_field(row, field)
                         if not is_image_path(val):  # Skip if it’s an image path
-                            if val and field.lower().endswith("link"):  # Handle links
-                                try:
-                                    result = urlparse(val)
-                                    if all([result.scheme, result.netloc]):  # Valid URL
+                            field_lower = field.lower().strip()
+                            matching_col = next((col for col in row.index if col.lower().strip() == field_lower), None)
+                            if matching_col:
+                                val = get_value_for_field(row, matching_col)
+                                if val and matching_col.lower().endswith("link"):  # Handle links
+                                    try:
+                                        result = urlparse(val)
+                                        if all([result.scheme, result.netloc]):  # Valid URL
+                                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
+                                            run.font.color.rgb = RGBColor(0, 0, 255)  # Blue
+                                            run.font.underline = True  # Underline
+                                            logger.info(f"Replaced {field} with hyperlink: {val}")
+                                        else:
+                                            run.text = run.text.replace(f"{{{{{field}}}}}", val)
+                                            logger.warning(f"Invalid URL for {field}: {val}")
+                                    except ValueError:
                                         run.text = run.text.replace(f"{{{{{field}}}}}", val)
-                                        run.font.color.rgb = RGBColor(0, 0, 255)  # Blue
-                                        run.font.underline = True  # Underline
-                                        logger.info(f"Replaced {field} with hyperlink: {val}")
-                                    else:
-                                        run.text = run.text.replace(f"{{{{{field}}}}}", val)
-                                        logger.warning(f"Invalid URL for {field}: {val}")
-                                except ValueError:
+                                        logger.warning(f"Invalid URL format for {field}: {val}")
+                                else:
                                     run.text = run.text.replace(f"{{{{{field}}}}}", val)
-                                    logger.warning(f"Invalid URL format for {field}: {val}")
+                                    logger.info(f"Replaced {field} with text: {val}")
                             else:
-                                run.text = run.text.replace(f"{{{{{field}}}}}", val)
-                                logger.info(f"Replaced {field} with text: {val}")
+                                logger.warning(f"No matching column for {field}")
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
