@@ -1,3 +1,4 @@
+print("=== WARNING: THIS IS THE REAL FILE v9.9.9 ===")
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -175,3 +176,4 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
         except Exception as e:
             logger.error(f"Error in /api/generate: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
