@@ -46,7 +46,7 @@ def find_image_path(value, images_dir):
     except: return None
 
 # ----------------------------------------------------------------------
-# RECURSIVE TEXT FRAME WALKER (Handles Groups, Placeholders, Tables)
+# RECURSIVE TEXT FRAME WALKER (Groups, Placeholders, Tables)
 # ----------------------------------------------------------------------
 def _iter_text_frames(shape):
     if hasattr(shape, "text_frame") and shape.text_frame:
@@ -59,7 +59,7 @@ def _iter_text_frames(shape):
             yield shape.text_frame
 
 # ----------------------------------------------------------------------
-# BULLETPROOF REPLACEMENT (All Features)
+# BULLETPROOF REPLACEMENT
 # ----------------------------------------------------------------------
 def _replace_in_text_frame(tf, row, is_image_pass=False):
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
@@ -79,7 +79,7 @@ def _replace_in_text_frame(tf, row, is_image_pass=False):
                 if not col: continue
                 val = get_value_for_field(row, col)
 
-                # Flexible match in original text
+                # Flexible match
                 escaped = re.escape(f"{{{{{field_raw}}}}}")
                 flexible = (
                     escaped
@@ -103,11 +103,9 @@ def _replace_in_text_frame(tf, row, is_image_pass=False):
                             new_text = new_text.replace(placeholder_text, val, 1)
                             run.font.color.rgb = RGBColor(0, 0, 255)
                             run.font.underline = True
-                            logger.info(f"Link: {val}")
                     except: pass
                 else:
                     new_text = new_text.replace(placeholder_text, val, 1)
-                    logger.info(f"Replaced {field_raw} → {val}")
             run.text = new_text
 
 # ----------------------------------------------------------------------
@@ -139,7 +137,7 @@ def replace_images_on_shape(shape, row, images_dir):
 # ----------------------------------------------------------------------
 def replace_text_in_obj(obj, row):
     for tf in _iter_text_frames(obj):
-        _replace_in_ text_frame(tf, row, is_image_pass=False)
+        _replace_in_text_frame(tf, row, is_image_pass=False)  # ← FIXED: NO SPACE
 
 # ----------------------------------------------------------------------
 # MAIN ENDPOINT
