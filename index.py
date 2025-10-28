@@ -48,8 +48,10 @@ def _iter_text_frames(shape):
     if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
         for child in shape.shapes:
             yield from _iter_text_frames(child)
-    if hasattr(shape, "is_placeholder") and shape.is_placeholder and hasattr(shape, "text_frame"):
-        yield shape.text_frame
+    # FIXED: Use .placeholder instead of .is_placeholder
+    if hasattr(shape, "placeholder") and shape.placeholder is not None:
+        if hasattr(shape, "text_frame") and shape.text_frame:
+            yield shape.text_frame
 
 def _replace_in_text_frame(tf, row, is_image_pass=False):
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
@@ -141,7 +143,7 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 slide = prs.slides[i]
                 for shape in slide.shapes:
                     replace_images_on_shape(shape, row, images_dir if images else tmpdir)
-                    if hasattr(shape, "table"):  # ← FIXED
+                    if hasattr(shape, "table"):
                         for row_cells in shape.table.rows:
                             for cell in row_cells.cells:
                                 replace_images_on_shape(cell, row, images_dir if images else tmpdir)
@@ -153,7 +155,7 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 slide = prs.slides[i]
                 for shape in slide.shapes:
                     replace_text_in_obj(shape, row)
-                    if hasattr(shape, "table"):  # ← FIXED
+                    if hasattr(shape, "table"):
                         for row_cells in shape.table.rows:
                             for cell in row_cells.cells:
                                 replace_text_in_obj(cell, row)
