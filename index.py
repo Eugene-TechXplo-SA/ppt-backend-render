@@ -23,7 +23,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For testing
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,7 +62,6 @@ def find_image_path(value, images_dir):
         if os.path.exists(candidate):
             logger.info(f"Found image: {candidate}")
             return candidate
-        # case-insensitive fallback
         for root, _, files in os.walk(images_dir):
             for file in files:
                 if file.lower() == clean_value.lower():
@@ -92,7 +91,7 @@ def _iter_text_frames(shape):
             yield shape.text_frame
 
 # ----------------------------------------------------------------------
-# BULLET-PROOF REPLACEMENT (handles en-dashes, spaces, punctuation)
+# BULLETPROOF REPLACEMENT (handles everything)
 # ----------------------------------------------------------------------
 def _replace_in_text_frame(tf, row, is_image_pass=False):
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
@@ -110,40 +109,42 @@ def _replace_in_text_frame(tf, row, is_image_pass=False):
             new_text = original_text
 
             for field_raw in matches:
-                # ---- CLEAN the field name -------------------------------------------------
+                # ---- CLEAN FIELD NAME (remove special chars, normalize) ----
                 field_clean = field_raw.strip()
-                field_clean = re.sub(r'\s+', ' ', field_clean)          # collapse spaces
-                field_clean = field_clean.replace('–', '-').replace('—', '-')  # normalise dashes
+                field_clean = re.sub(r'\s+', ' ', field_clean)
+                field_clean = field_clean.replace('–', '-').replace('—', '-')
+                field_clean = re.sub(r'[^a-zA-Z0-9\s]', '', field_clean)  # Strip #, (, ), etc.
+                field_clean = field_clean.strip()
 
-                # ---- Find Excel column ----------------------------------------------------
+                # ---- FIND EXCEL COLUMN (case-insensitive) ----
                 col = next((c for c in row.index if c.lower().strip() == field_clean.lower()), None)
                 if not col:
                     logger.debug(f"Column not found for cleaned field: {field_clean}")
                     continue
                 val = get_value_for_field(row, col)
 
-                # ---- Build a flexible regex that finds the *exact* placeholder in the original text
+                # ---- FLEXIBLE REGEX TO FIND PLACEHOLDER IN ORIGINAL TEXT ----
                 escaped = re.escape(f"{{{{{field_raw}}}}}")
                 flexible = (
                     escaped
-                    .replace('\\{\\{', r'\s*\{\{\s*')      # spaces inside {{
-                    .replace('\\}\\}', r'\s*\}\}')        # spaces inside }}
-                    .replace('\\-', r'[-–—]')             # any dash
-                    .replace('\\ ', r'\s*')               # any whitespace
+                    .replace('\\{\\{', r'\s*\{\{\s*')
+                    .replace('\\}\\}', r'\s*\}\}')
+                    .replace('\\-', r'[-–—]')
+                    .replace('\\ ', r'\s*')
                 )
                 match = re.search(flexible, new_text, re.UNICODE)
                 if not match:
-                    logger.warning(f"Placeholder not located in run: {field_raw}")
+                    logger.warning(f"Placeholder not located: {field_raw}")
                     continue
 
                 placeholder_text = match.group(0)
 
-                # ---- IMAGE PASS -----------------------------------------------------------
+                # ---- IMAGE PASS ----
                 if is_image_pass and is_image_path(val):
                     new_text = new_text.replace(placeholder_text, "", 1)
                     continue
 
-                # ---- TEXT PASS ------------------------------------------------------------
+                # ---- TEXT PASS ----
                 if col.lower().endswith("link"):
                     try:
                         result = urlparse(val)
@@ -163,14 +164,12 @@ def _replace_in_text_frame(tf, row, is_image_pass=False):
             run.text = new_text
 
 # ----------------------------------------------------------------------
-# IMAGE REPLACEMENT (uses the new helper)
+# IMAGE REPLACEMENT
 # ----------------------------------------------------------------------
 def replace_images_on_shape(shape, row, images_dir):
-    """First pass – only images (recursive)."""
     for tf in _iter_text_frames(shape):
         _replace_in_text_frame(tf, row, is_image_pass=True)
 
-    # ---- actual picture insertion (unchanged) ---------------------------------
     placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
     if hasattr(shape, "has_text_frame") and shape.has_text_frame:
         full_text = "".join(r.text or "" for p in shape.text_frame.paragraphs for r in p.runs)
@@ -193,64 +192,43 @@ def replace_images_on_shape(shape, row, images_dir):
                     return
 
 # ----------------------------------------------------------------------
-# TEXT REPLACEMENT (uses the new helper)
+# TEXT REPLACEMENT
 # ----------------------------------------------------------------------
 def replace_text_in_obj(obj, row):
-    """Second pass – plain text & hyperlinks (recursive)."""
     for tf in _iter_text_frames(obj):
         _replace_in_text_frame(tf, row, is_image_pass=False)
 
 # ----------------------------------------------------------------------
-# MAIN ENDPOINT (unchanged except the two-pass calls)
+# MAIN ENDPOINT
 # ----------------------------------------------------------------------
 @app.post("/api/generate")
 async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), images: UploadFile = File(None)):
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            excel_filename = excel.filename or "content.xlsx"
-            ppt_filename = ppt.filename or "template_client.pptx"
-            excel_path = os.path.join(tmpdir, excel_filename)
-            ppt_path = os.path.join(tmpdir, ppt_filename)
+            excel_path = os.path.join(tmpdir, excel.filename or "content.xlsx")
+            ppt_path = os.path.join(tmpdir, ppt.filename or "template_client.pptx")
             images_dir = os.path.join(tmpdir, "images")
-            logger.info(f"Saving files: excel={excel_path}, ppt={ppt_path}")
 
-            # ----- read excel -----
-            excel_content = await excel.read()
-            if not excel_content:
-                raise HTTPException(status_code=400, detail="Excel file is empty")
+            # Save files
             with open(excel_path, "wb") as f:
-                f.write(excel_content)
-
-            # ----- read ppt -----
-            ppt_content = await ppt.read()
-            if not ppt_content:
-                raise HTTPException(status_code=400, detail="PowerPoint file is empty")
+                f.write(await excel.read())
             with open(ppt_path, "wb") as f:
-                f.write(ppt_content)
+                f.write(await ppt.read())
 
-            # ----- optional images zip -----
             if images:
-                zip_filename = images.filename or "images.zip"
-                zip_path = os.path.join(tmpdir, zip_filename)
-                zip_content = await images.read()
-                if not zip_content:
-                    raise HTTPException(status_code=400, detail="Images ZIP file is empty")
+                zip_path = os.path.join(tmpdir, images.filename or "images.zip")
                 with open(zip_path, "wb") as f:
-                    f.write(zip_content)
-                try:
-                    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                        zip_ref.extractall(images_dir)
-                    logger.info(f"Extracted images to: {images_dir}")
-                except zipfile.BadZipFile as e:
-                    logger.error(f"Invalid ZIP file: {str(e)}")
-                    raise HTTPException(status_code=400, detail=f"Invalid ZIP file: {str(e)}")
+                    f.write(await images.read())
+                with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                    zip_ref.extractall(images_dir)
+                logger.info(f"Extracted images to: {images_dir}")
 
-            # ----- load data -----
+            # Load data
             df = pd.read_excel(excel_path)
             df.columns = [col.strip() for col in df.columns]
             prs = Presentation(ppt_path)
 
-            # ----- IMAGE PASS -----
+            # IMAGE PASS
             logger.info("Processing slides – Step 1: Images")
             for i, row in df.iterrows():
                 if i >= len(prs.slides):
@@ -258,12 +236,12 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 slide = prs.slides[i]
                 for shape in slide.shapes:
                     replace_images_on_shape(shape, row, images_dir if images else tmpdir)
-                    if shape.shape_type == 19:  # TABLE
+                    if hasattr(shape, "table"):
                         for row_cells in shape.table.rows:
                             for cell in row_cells.cells:
                                 replace_images_on_shape(cell, row, images_dir if images else tmpdir)
 
-            # ----- TEXT PASS -----
+            # TEXT PASS
             logger.info("Processing slides – Step 2: Text")
             for i, row in df.iterrows():
                 if i >= len(prs.slides):
@@ -271,18 +249,18 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 slide = prs.slides[i]
                 for shape in slide.shapes:
                     replace_text_in_obj(shape, row)
-                    if shape.shape_type == 19:  # TABLE
+                    if hasattr(shape, "table"):
                         for row_cells in shape.table.rows:
                             for cell in row_cells.cells:
                                 replace_text_in_obj(cell, row)
 
-            # ----- save output -----
+            # Save and return
             output_file = os.path.join(tmpdir, "Client_Presentation.pptx")
             prs.save(output_file)
 
-            # ----- stream back -----
             with open(output_file, "rb") as f:
                 file_content = f.read()
+
             return StreamingResponse(
                 io.BytesIO(file_content),
                 media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
