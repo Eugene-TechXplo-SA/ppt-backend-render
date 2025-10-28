@@ -45,42 +45,57 @@ def find_image_path(value, images_dir):
     except: return None
 
 # ----------------------------------------------------------------------
-# TEXT REPLACEMENT (DASHES + LINKS)
+# TEXT REPLACEMENT (ALL FIXES)
 # ----------------------------------------------------------------------
 def replace_text_in_obj(obj, row):
-    placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
+    placeholder_pattern = re.compile(r"\{\{\s*(.*?)\s*\}\}")  # ← STRIP SPACES INSIDE
     try:
         if hasattr(obj, "text_frame") and obj.text_frame is not None:
             for paragraph in obj.text_frame.paragraphs:
                 for run in paragraph.runs:
                     matches = placeholder_pattern.findall(run.text)
-                    for field in matches:
-                        val = get_value_for_field(row, field)
-                        if not is_image_path(val):
-                            # DASH FIX
-                            escaped = re.escape(f"{{{{{field}}}}}")
-                            flexible = (
-                                escaped
-                                .replace('\\{\\{', r'\s*\{\{\s*')
-                                .replace('\\}\\}', r'\s*\}\}')
-                                .replace('\\-', r'[-–—]')
-                                .replace('\\ ', r'\s*')
-                            )
-                            match = re.search(flexible, run.text, re.UNICODE)
-                            if match:
-                                placeholder_text = match.group(0)
-                                # LINK STYLING
-                                if field.lower().endswith("link"):
-                                    try:
-                                        result = urlparse(val)
-                                        if all([result.scheme, result.netloc]):
-                                            run.text = run.text.replace(placeholder_text, val, 1)
-                                            run.font.color.rgb = RGBColor(0, 0, 255)
-                                            run.font.underline = True
-                                            continue
-                                    except: pass
-                                # NORMAL TEXT
-                                run.text = run.text.replace(placeholder_text, val, 1)
+                    for field_raw in matches:
+                        # CLEAN FIELD: strip + normalize
+                        field_clean = re.sub(r'\s+', ' ', field_raw.strip()).lower()
+                        field_clean = re.sub(r'[^a-z0-9\s]', '', field_clean)  # remove special chars
+
+                        # FIND COLUMN (case-insensitive)
+                        col = next((c for c in row.index if c.strip().lower() == field_clean), None)
+                        if not col:
+                            continue
+                        val = get_value_for_field(row, col)
+
+                        if is_image_path(val):
+                            continue  # handled in image pass
+
+                        # FLEXIBLE MATCH IN TEXT
+                        escaped = re.escape(f"{{{{{field_raw}}}}}")
+                        flexible = (
+                            escaped
+                            .replace('\\{\\{', r'\s*\{\{\s*')
+                            .replace('\\}\\}', r'\s*\}\}')
+                            .replace('\\-', r'[-–—]')
+                            .replace('\\ ', r'\s*')
+                        )
+                        match = re.search(flexible, run.text, re.UNICODE)
+                        if not match:
+                            continue
+                        placeholder_text = match.group(0)
+
+                        # LINK STYLING
+                        if col.lower().endswith("link"):
+                            try:
+                                result = urlparse(val)
+                                if all([result.scheme, result.netloc]):
+                                    run.text = run.text.replace(placeholder_text, val, 1)
+                                    run.font.color.rgb = RGBColor(0, 0, 255)
+                                    run.font.underline = True
+                                    continue
+                            except: pass
+
+                        # NORMAL TEXT
+                        run.text = run.text.replace(placeholder_text, val, 1)
+
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
@@ -88,19 +103,24 @@ def replace_text_in_obj(obj, row):
 # IMAGE REPLACEMENT (unchanged)
 # ----------------------------------------------------------------------
 def replace_images_on_shape(shape, row, images_dir):
-    placeholder_pattern = re.compile(r"\{\{(.*?)\}\}")
+    placeholder_pattern = re.compile(r"\{\{\s*(.*?)\s*\}\}")
     try:
         if hasattr(shape, "has_text_frame") and shape.has_text_frame:
             full_text = "".join(r.text or "" for p in shape.text_frame.paragraphs for r in p.runs)
             matches = placeholder_pattern.findall(full_text)
-            for field in matches:
-                val = get_value_for_field(row, field)
+            for field_raw in matches:
+                field_clean = re.sub(r'\s+', ' ', field_raw.strip()).lower()
+                field_clean = re.sub(r'[^a-z0-9\s]', '', field_clean)
+                col = next((c for c in row.index if c.strip().lower() == field_clean), None)
+                if not col:
+                    continue
+                val = get_value_for_field(row, col)
                 if is_image_path(val):
                     img_path = find_image_path(val, images_dir)
                     if img_path:
                         for p in shape.text_frame.paragraphs:
                             for r in p.runs:
-                                r.text = r.text.replace(f"{{{{{field}}}}}", "")
+                                r.text = r.text.replace(f"{{{{{field_raw}}}}}", "", 1)
                         left, top, width, height = shape.left, shape.top, shape.width, shape.height
                         sp = shape._element
                         sp.getparent().remove(sp)
@@ -111,7 +131,7 @@ def replace_images_on_shape(shape, row, images_dir):
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
 # ----------------------------------------------------------------------
-# MAIN ENDPOINT (TABLES ADDED SAFELY)
+# MAIN ENDPOINT (TABLES SAFE)
 # ----------------------------------------------------------------------
 @app.post("/api/generate")
 async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), images: UploadFile = File(None)):
@@ -132,7 +152,7 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 logger.info(f"Extracted images to: {images_dir}")
 
             df = pd.read_excel(excel_path)
-            df.columns = [col.strip() for col in df.columns]
+            df.columns = [col.strip() for col in df.columns]  # clean Excel headers
             prs = Presentation(ppt_path)
 
             # PASS 1: Images
@@ -142,7 +162,6 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 slide = prs.slides[i]
                 for shape in slide.shapes:
                     replace_images_on_shape(shape, row, images_dir if images else tmpdir)
-                    # TABLES: SAFE
                     if hasattr(shape, "table"):
                         for row_cells in shape.table.rows:
                             for cell in row_cells.cells:
@@ -155,7 +174,6 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                 slide = prs.slides[i]
                 for shape in slide.shapes:
                     replace_text_in_obj(shape, row)
-                    # TABLES: SAFE
                     if hasattr(shape, "table"):
                         for row_cells in shape.table.rows:
                             for cell in row_cells.cells:
