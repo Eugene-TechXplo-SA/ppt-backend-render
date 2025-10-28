@@ -1,4 +1,5 @@
 print("=== WARNING: THIS IS THE REAL FILE v9.9.9 ===")
+
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,7 +50,6 @@ def _iter_text_frames(shape):
     if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
         for child in shape.shapes:
             yield from _iter_text_frames(child)
-    # FIXED: Use .placeholder instead of .is_placeholder
     if hasattr(shape, "placeholder") and shape.placeholder is not None:
         if hasattr(shape, "text_frame") and shape.text_frame:
             yield shape.text_frame
@@ -117,6 +117,8 @@ def replace_text_in_obj(obj, row):
 
 @app.post("/api/generate")
 async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), images: UploadFile = File(None)):
+    logger.info("LIVE CODE v9.9.9 - TABLE FIX ACTIVE")  # ← PROOF IT'S RUNNING
+    print("LIVE CODE v9.9.9 RUNNING")
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             excel_path = os.path.join(tmpdir, excel.filename or "content.xlsx")
@@ -137,7 +139,6 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
             df.columns = [col.strip() for col in df.columns]
             prs = Presentation(ppt_path)
 
-            # IMAGE PASS
             logger.info("Processing slides – Step 1: Images")
             for i, row in df.iterrows():
                 if i >= len(prs.slides): break
@@ -149,7 +150,6 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
                             for cell in row_cells.cells:
                                 replace_images_on_shape(cell, row, images_dir if images else tmpdir)
 
-            # TEXT PASS
             logger.info("Processing slides – Step 2: Text")
             for i, row in df.iterrows():
                 if i >= len(prs.slides): break
@@ -176,4 +176,3 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
         except Exception as e:
             logger.error(f"Error in /api/generate: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-
