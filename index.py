@@ -45,22 +45,22 @@ def find_image_path(value, images_dir):
     except: return None
 
 # ----------------------------------------------------------------------
-# TEXT REPLACEMENT (ALL FIXES)
+# TEXT REPLACEMENT (ALL FIXES + & / () SUPPORT)
 # ----------------------------------------------------------------------
 def replace_text_in_obj(obj, row):
-    placeholder_pattern = re.compile(r"\{\{\s*(.*?)\s*\}\}")  # ← STRIP SPACES INSIDE
+    placeholder_pattern = re.compile(r"\{\{\s*(.*?)\s*\}\}")  # Strip spaces inside {{ }}
     try:
         if hasattr(obj, "text_frame") and obj.text_frame is not None:
             for paragraph in obj.text_frame.paragraphs:
                 for run in paragraph.runs:
                     matches = placeholder_pattern.findall(run.text)
                     for field_raw in matches:
-                        # CLEAN FIELD: strip + normalize
-                        field_clean = re.sub(r'\s+', ' ', field_raw.strip()).lower()
-                        field_clean = re.sub(r'[^a-z0-9\s]', '', field_clean)  # remove special chars
+                        # CLEAN: only normalize spaces, keep & / ( )
+                        field_clean = re.sub(r'\s+', ' ', field_raw.strip())  # ← ONLY SPACES
+                        field_key = field_clean.lower()
 
-                        # FIND COLUMN (case-insensitive)
-                        col = next((c for c in row.index if c.strip().lower() == field_clean), None)
+                        # FIND COLUMN: case-insensitive, exact match on cleaned name
+                        col = next((c for c in row.index if c.strip().lower() == field_key), None)
                         if not col:
                             continue
                         val = get_value_for_field(row, col)
@@ -68,7 +68,7 @@ def replace_text_in_obj(obj, row):
                         if is_image_path(val):
                             continue  # handled in image pass
 
-                        # FLEXIBLE MATCH IN TEXT
+                        # FLEXIBLE MATCH IN TEXT (dashes, spaces)
                         escaped = re.escape(f"{{{{{field_raw}}}}}")
                         flexible = (
                             escaped
@@ -100,7 +100,7 @@ def replace_text_in_obj(obj, row):
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
 # ----------------------------------------------------------------------
-# IMAGE REPLACEMENT (unchanged)
+# IMAGE REPLACEMENT (updated for & / () )
 # ----------------------------------------------------------------------
 def replace_images_on_shape(shape, row, images_dir):
     placeholder_pattern = re.compile(r"\{\{\s*(.*?)\s*\}\}")
@@ -109,9 +109,9 @@ def replace_images_on_shape(shape, row, images_dir):
             full_text = "".join(r.text or "" for p in shape.text_frame.paragraphs for r in p.runs)
             matches = placeholder_pattern.findall(full_text)
             for field_raw in matches:
-                field_clean = re.sub(r'\s+', ' ', field_raw.strip()).lower()
-                field_clean = re.sub(r'[^a-z0-9\s]', '', field_clean)
-                col = next((c for c in row.index if c.strip().lower() == field_clean), None)
+                field_clean = re.sub(r'\s+', ' ', field_raw.strip())
+                field_key = field_clean.lower()
+                col = next((c for c in row.index if c.strip().lower() == field_key), None)
                 if not col:
                     continue
                 val = get_value_for_field(row, col)
