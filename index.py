@@ -11,7 +11,6 @@ import re
 import logging
 import io
 from urllib.parse import urlparse
-from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -119,36 +118,15 @@ def replace_images_on_shape(shape, row, images_dir):
                 if is_image_path(val):
                     img_path = find_image_path(val, images_dir)
                     if img_path:
-                        # Remove placeholder text
                         for p in shape.text_frame.paragraphs:
                             for r in p.runs:
                                 r.text = r.text.replace(f"{{{{{field_raw}}}}}", "", 1)
-
-                        # Preserve aspect ratio & center
-                        with Image.open(img_path) as img:
-                            img_w, img_h = img.size
-
-                        ph_w = shape.width.pt
-                        ph_h = shape.height.pt
-
-                        scale = min(ph_w / img_w, ph_h / img_h)
-
-                        new_w = img_w * scale
-                        new_h = img_h * scale
-
-                        left_offset = (ph_w - new_w) / 2
-                        top_offset = (ph_h - new_h) / 2
-
+                        left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                        sp = shape._element
+                        sp.getparent().remove(sp)
                         slide = shape.part.slide
-                        slide.shapes.add_picture(
-                            img_path,
-                            left=shape.left.pt + left_offset,
-                            top=shape.top.pt + top_offset,
-                            width=new_w,
-                            height=new_h
-                        )
-                        logger.info(f"Inserted image: {img_path} (aspect preserved)")
-                        return  # Exit early after insertion
+                        slide.shapes.add_picture(img_path, left, top, width=width, height=height)
+                        return
     except Exception as e:
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
@@ -216,4 +194,3 @@ async def generate(excel: UploadFile = File(...), ppt: UploadFile = File(...), i
         except Exception as e:
             logger.error(f"Error in /api/generate: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-
