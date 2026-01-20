@@ -246,18 +246,26 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
                     continue
 
                 val = get_value_for_field(row, col)
+
+                is_image_column = any(keyword in col.lower() for keyword in ['image', 'screenshot', 'photo', 'picture', 'pic', 'map'])
+
+                if not is_image_column:
+                    logger.debug(f"Skipping non-image column: {col}")
+                    continue
+
                 logger.info(f"Processing image placeholder '{field_raw}' (column: '{col}') with value: '{val}' and site: '{site_identifier}'")
 
                 img_path = None
 
-                is_image_column = any(keyword in col.lower() for keyword in ['image', 'screenshot', 'photo', 'picture', 'pic', 'map'])
+                is_placeholder_text = val and '{{' in str(val) and '}}' in str(val)
+                is_empty_or_placeholder = not val or is_placeholder_text
 
-                if is_image_path(val):
+                if is_image_path(val) and not is_placeholder_text:
                     img_path = find_image_path_enhanced(val, images_dir, site_identifier)
                     if img_path:
                         logger.info(f"Found image via file path: {img_path}")
-                elif not val and is_image_column and site_identifier:
-                    logger.info(f"Cell is empty and column appears to be for images, trying folder lookup for site: {site_identifier}")
+                elif is_empty_or_placeholder and site_identifier:
+                    logger.info(f"Cell is empty/placeholder for image column, trying folder lookup for site: {site_identifier}")
                     folder_path = find_folder_for_site(site_identifier, images_dir)
                     if folder_path:
                         img_path = get_first_image_from_folder(folder_path)
@@ -268,10 +276,7 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
                     else:
                         logger.warning(f"No folder found for site: {site_identifier}")
                 else:
-                    if not is_image_column:
-                        logger.debug(f"Skipping image replacement for text column: {col}")
-                    else:
-                        logger.debug(f"Cell has text value and is not an image path, skipping: {val}")
+                    logger.debug(f"Cell has non-image value: {val}")
 
                 if img_path:
                     for p in shape.text_frame.paragraphs:
