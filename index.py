@@ -250,12 +250,14 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
 
                 img_path = None
 
+                is_image_column = any(keyword in col.lower() for keyword in ['image', 'screenshot', 'photo', 'picture', 'pic', 'map'])
+
                 if is_image_path(val):
                     img_path = find_image_path_enhanced(val, images_dir, site_identifier)
                     if img_path:
                         logger.info(f"Found image via file path: {img_path}")
-                elif site_identifier:
-                    logger.info(f"Cell value is not an image path, trying folder lookup for site: {site_identifier}")
+                elif not val and is_image_column and site_identifier:
+                    logger.info(f"Cell is empty and column appears to be for images, trying folder lookup for site: {site_identifier}")
                     folder_path = find_folder_for_site(site_identifier, images_dir)
                     if folder_path:
                         img_path = get_first_image_from_folder(folder_path)
@@ -266,7 +268,10 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
                     else:
                         logger.warning(f"No folder found for site: {site_identifier}")
                 else:
-                    logger.warning(f"No image path in cell and no site identifier for placeholder: {field_raw}")
+                    if not is_image_column:
+                        logger.debug(f"Skipping image replacement for text column: {col}")
+                    else:
+                        logger.debug(f"Cell has text value and is not an image path, skipping: {val}")
 
                 if img_path:
                     for p in shape.text_frame.paragraphs:
