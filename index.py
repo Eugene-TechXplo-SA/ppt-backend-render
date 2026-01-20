@@ -107,22 +107,117 @@ def get_first_image_from_folder(folder_path: str) -> Optional[str]:
 
     return None
 
-def find_image_path_enhanced(value: str, images_dir: str, site_identifier: Optional[str] = None) -> Optional[str]:
+def detect_image_type_from_column(column_name: str) -> str:
     """
-    Enhanced image finding with folder-based support.
+    Detect the image type based on column name.
+    Returns: 'map_screenshot', 'site_image', or 'unknown'
+    """
+    col_lower = column_name.lower()
+
+    # Check for map/screenshot keywords
+    if any(keyword in col_lower for keyword in ['map', 'screenshot', 'location']):
+        return 'map_screenshot'
+
+    # Check for site image keywords
+    if any(keyword in col_lower for keyword in ['site', 'photo', 'picture', 'image', 'pic']):
+        return 'site_image'
+
+    return 'unknown'
+
+def find_subfolder(site_folder: str, subfolder_type: str) -> Optional[str]:
+    """
+    Find a subfolder within a site folder based on type.
+    Supports flexible matching for subfolder names.
+
+    Args:
+        site_folder: Path to the site folder
+        subfolder_type: Either 'site_image' or 'map_screenshot'
+
+    Returns:
+        Path to the subfolder if found, None otherwise
+    """
+    if not os.path.exists(site_folder) or not os.path.isdir(site_folder):
+        return None
+
+    # Define possible subfolder name variations
+    subfolder_patterns = {
+        'site_image': ['site image', 'siteimage', 'site_image', 'site-image', 'site'],
+        'map_screenshot': ['map screenshot', 'mapscreenshot', 'map_screenshot', 'map-screenshot', 'map']
+    }
+
+    patterns = subfolder_patterns.get(subfolder_type, [])
+
+    for item in os.listdir(site_folder):
+        item_path = os.path.join(site_folder, item)
+        if os.path.isdir(item_path):
+            normalized_item = normalize_name(item)
+            for pattern in patterns:
+                if normalized_item == normalize_name(pattern):
+                    logger.info(f"Found subfolder '{item}' matching type '{subfolder_type}'")
+                    return item_path
+
+    return None
+
+def get_image_from_subfolder(site_folder: str, image_type: str) -> Optional[str]:
+    """
+    Get the first image from the appropriate subfolder within a site folder.
+
+    Args:
+        site_folder: Path to the site folder
+        image_type: Either 'map_screenshot' or 'site_image'
+
+    Returns:
+        Path to the image if found, None otherwise
+    """
+    if not site_folder or not image_type:
+        return None
+
+    subfolder = find_subfolder(site_folder, image_type)
+    if subfolder:
+        image_path = get_first_image_from_folder(subfolder)
+        if image_path:
+            logger.info(f"Found image in subfolder '{subfolder}': {image_path}")
+            return image_path
+        else:
+            logger.warning(f"Subfolder '{subfolder}' exists but contains no images")
+    else:
+        logger.debug(f"No subfolder found for type '{image_type}' in '{site_folder}'")
+
+    return None
+
+def find_image_path_enhanced(value: str, images_dir: str, site_identifier: Optional[str] = None, image_type: str = 'unknown') -> Optional[str]:
+    """
+    Enhanced image finding with subfolder-based support.
 
     Strategy:
-    1. If site_identifier provided, look for folder matching site name
-    2. Fall back to exact filename matching (backward compatibility)
-    3. Fall back to case-insensitive filename search
+    1. If site_identifier and image_type provided, look for image in appropriate subfolder
+    2. Fall back to legacy folder structure (all images in site folder)
+    3. Fall back to exact filename matching (backward compatibility)
+    4. Fall back to case-insensitive filename search
+
+    Args:
+        value: The value from the Excel cell
+        images_dir: Root directory containing images
+        site_identifier: Name/ID of the site
+        image_type: Type of image ('site_image', 'map_screenshot', or 'unknown')
     """
     try:
         if site_identifier:
             folder_path = find_folder_for_site(site_identifier, images_dir)
             if folder_path:
+                # Try new subfolder structure first
+                if image_type != 'unknown':
+                    image_path = get_image_from_subfolder(folder_path, image_type)
+                    if image_path:
+                        logger.info(f"Found image in subfolder (type: {image_type}): {image_path}")
+                        return image_path
+                    else:
+                        logger.info(f"No image found in subfolder for type '{image_type}', trying legacy structure")
+
+                # Fall back to legacy structure (images directly in site folder)
                 image_path = get_first_image_from_folder(folder_path)
                 if image_path:
-                    logger.info(f"Found image in folder: {image_path}")
+                    logger.info(f"Found image in legacy folder structure: {image_path}")
                     return image_path
 
         clean_value = value.replace("images/", "", 1) if value.startswith("images/") else value
@@ -145,7 +240,7 @@ def find_image_path_enhanced(value: str, images_dir: str, site_identifier: Optio
         return None
 
 def validate_zip_structure(zip_path: str, df: pd.DataFrame, site_column: Optional[str] = None) -> Dict:
-    """Validate ZIP structure and return detailed report."""
+    """Validate ZIP structure and return detailed report with subfolder support."""
     validation_result = {
         "valid": True,
         "errors": [],
@@ -156,7 +251,8 @@ def validate_zip_structure(zip_path: str, df: pd.DataFrame, site_column: Optiona
             "loose_files": [],
             "matched_sites": [],
             "unmatched_sites": [],
-            "extra_folders": []
+            "extra_folders": [],
+            "subfolder_structure": {}
         }
     }
 
@@ -181,12 +277,60 @@ def validate_zip_structure(zip_path: str, df: pd.DataFrame, site_column: Optiona
                 for site in sites:
                     folder_path = find_folder_for_site(site, extract_dir)
                     if folder_path:
-                        image = get_first_image_from_folder(folder_path)
-                        if image:
-                            validation_result["structure"]["matched_sites"].append(site)
+                        # Check for subfolder structure
+                        site_image_subfolder = find_subfolder(folder_path, 'site_image')
+                        map_screenshot_subfolder = find_subfolder(folder_path, 'map_screenshot')
+
+                        has_subfolders = site_image_subfolder or map_screenshot_subfolder
+                        site_image_count = 0
+                        map_screenshot_count = 0
+
+                        if site_image_subfolder:
+                            site_images = [f for f in os.listdir(site_image_subfolder)
+                                          if os.path.isfile(os.path.join(site_image_subfolder, f)) and
+                                          any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp'])]
+                            site_image_count = len(site_images)
+
+                        if map_screenshot_subfolder:
+                            map_images = [f for f in os.listdir(map_screenshot_subfolder)
+                                         if os.path.isfile(os.path.join(map_screenshot_subfolder, f)) and
+                                         any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp'])]
+                            map_screenshot_count = len(map_images)
+
+                        # Check for legacy structure (images directly in folder)
+                        direct_images = [f for f in os.listdir(folder_path)
+                                        if os.path.isfile(os.path.join(folder_path, f)) and
+                                        any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp'])]
+
+                        validation_result["structure"]["subfolder_structure"][site] = {
+                            "has_subfolders": has_subfolders,
+                            "site_image_subfolder": site_image_subfolder is not None,
+                            "site_image_count": site_image_count,
+                            "map_screenshot_subfolder": map_screenshot_subfolder is not None,
+                            "map_screenshot_count": map_screenshot_count,
+                            "direct_images": len(direct_images),
+                            "structure_type": "subfolder" if has_subfolders else "legacy"
+                        }
+
+                        if has_subfolders:
+                            if site_image_count > 0 or map_screenshot_count > 0:
+                                validation_result["structure"]["matched_sites"].append(site)
+                                if site_image_count > 0 and map_screenshot_count > 0:
+                                    logger.info(f"✓ Site '{site}': Using subfolder structure with {site_image_count} site image(s) and {map_screenshot_count} map screenshot(s)")
+                                elif site_image_count > 0:
+                                    validation_result["warnings"].append(f"Site '{site}' has Site Image subfolder but missing Map Screenshot subfolder")
+                                elif map_screenshot_count > 0:
+                                    validation_result["warnings"].append(f"Site '{site}' has Map Screenshot subfolder but missing Site Image subfolder")
+                            else:
+                                validation_result["structure"]["unmatched_sites"].append(site)
+                                validation_result["warnings"].append(f"Site '{site}' has subfolders but they contain no images")
                         else:
-                            validation_result["structure"]["unmatched_sites"].append(site)
-                            validation_result["warnings"].append(f"Folder found for '{site}' but no images inside")
+                            if len(direct_images) > 0:
+                                validation_result["structure"]["matched_sites"].append(site)
+                                validation_result["warnings"].append(f"Site '{site}' is using legacy structure ({len(direct_images)} image(s) directly in folder)")
+                            else:
+                                validation_result["structure"]["unmatched_sites"].append(site)
+                                validation_result["warnings"].append(f"Folder found for '{site}' but no images inside")
                     else:
                         validation_result["structure"]["unmatched_sites"].append(site)
                         validation_result["warnings"].append(f"No folder found for site: {site}")
@@ -288,7 +432,9 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
                     logger.debug(f"Skipping non-image column: {col}")
                     continue
 
-                logger.info(f"Processing image placeholder '{field_raw}' (column: '{col}') with value: '{val}' and site: '{site_identifier}'")
+                # Detect image type from column name
+                image_type = detect_image_type_from_column(col)
+                logger.info(f"Processing image placeholder '{field_raw}' (column: '{col}', type: '{image_type}') with value: '{val}' and site: '{site_identifier}'")
 
                 img_path = None
 
@@ -296,18 +442,28 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
                 is_empty_or_placeholder = not val or is_placeholder_text
 
                 if is_image_path(val) and not is_placeholder_text:
-                    img_path = find_image_path_enhanced(val, images_dir, site_identifier)
+                    img_path = find_image_path_enhanced(val, images_dir, site_identifier, image_type)
                     if img_path:
                         logger.info(f"Found image via file path: {img_path}")
                 elif is_empty_or_placeholder and site_identifier:
-                    logger.info(f"Cell is empty/placeholder for image column, trying folder lookup for site: {site_identifier}")
+                    logger.info(f"Cell is empty/placeholder for image column, trying subfolder lookup for site: {site_identifier} (type: {image_type})")
                     folder_path = find_folder_for_site(site_identifier, images_dir)
                     if folder_path:
-                        img_path = get_first_image_from_folder(folder_path)
-                        if img_path:
-                            logger.info(f"Found image via site folder: {img_path}")
-                        else:
-                            logger.warning(f"Site folder found but no images inside: {folder_path}")
+                        # Try subfolder structure first
+                        if image_type != 'unknown':
+                            img_path = get_image_from_subfolder(folder_path, image_type)
+                            if img_path:
+                                logger.info(f"Found image via subfolder (type: {image_type}): {img_path}")
+                            else:
+                                logger.info(f"No subfolder found for type '{image_type}', trying legacy structure")
+
+                        # Fall back to legacy structure if subfolder approach didn't work
+                        if not img_path:
+                            img_path = get_first_image_from_folder(folder_path)
+                            if img_path:
+                                logger.info(f"Found image via legacy folder structure: {img_path}")
+                            else:
+                                logger.warning(f"Site folder found but no images inside: {folder_path}")
                     else:
                         logger.warning(f"No folder found for site: {site_identifier}")
                 else:
