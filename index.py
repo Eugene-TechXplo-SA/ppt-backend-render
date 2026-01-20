@@ -7,6 +7,7 @@ import zipfile
 import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from PIL import Image
 import re
 import logging
 import io
@@ -35,6 +36,40 @@ def normalize_name(name: str) -> str:
     normalized = re.sub(r'[^a-zA-Z0-9\s]', '', normalized)
     normalized = re.sub(r'\s+', ' ', normalized)
     return normalized.strip().lower()
+
+def calculate_fit_dimensions(img_path: str, shape_width: int, shape_height: int, shape_left: int, shape_top: int) -> Tuple[int, int, int, int]:
+    """
+    Calculate dimensions and position to fit an image within a shape while maintaining aspect ratio.
+    Returns: (left, top, width, height) for the fitted image.
+    """
+    try:
+        with Image.open(img_path) as img:
+            img_width, img_height = img.size
+
+        # Calculate aspect ratios
+        img_aspect = img_width / img_height
+        shape_aspect = shape_width / shape_height
+
+        # Determine dimensions based on aspect ratio comparison
+        if img_aspect > shape_aspect:
+            # Image is wider - constrain by width
+            new_width = shape_width
+            new_height = int(shape_width / img_aspect)
+        else:
+            # Image is taller or equal - constrain by height
+            new_height = shape_height
+            new_width = int(shape_height * img_aspect)
+
+        # Center the image within the shape
+        new_left = shape_left + (shape_width - new_width) // 2
+        new_top = shape_top + (shape_height - new_height) // 2
+
+        return new_left, new_top, new_width, new_height
+
+    except Exception as e:
+        logger.error(f"Error calculating fit dimensions: {str(e)}")
+        # Fallback to original dimensions if calculation fails
+        return shape_left, shape_top, shape_width, shape_height
 
 def find_folder_for_site(site_identifier: str, images_dir: str) -> Optional[str]:
     """Find a folder matching the site identifier using flexible matching."""
@@ -283,11 +318,17 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
                         for r in p.runs:
                             r.text = r.text.replace(f"{{{{{field_raw}}}}}", "", 1)
                     left, top, width, height = shape.left, shape.top, shape.width, shape.height
+
+                    # Calculate fitted dimensions to maintain aspect ratio
+                    fitted_left, fitted_top, fitted_width, fitted_height = calculate_fit_dimensions(
+                        img_path, width, height, left, top
+                    )
+
                     sp = shape._element
                     sp.getparent().remove(sp)
                     slide = shape.part.slide
-                    slide.shapes.add_picture(img_path, left, top, width=width, height=height)
-                    logger.info(f"Successfully inserted image for placeholder: {field_raw}")
+                    slide.shapes.add_picture(img_path, fitted_left, fitted_top, width=fitted_width, height=fitted_height)
+                    logger.info(f"Successfully inserted image for placeholder: {field_raw} with fit dimensions")
                     return
                 else:
                     logger.warning(f"No image found for placeholder: {field_raw}")
