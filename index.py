@@ -242,20 +242,45 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
                 field_key = field_clean.lower()
                 col = next((c for c in row.index if c.strip().lower() == field_key), None)
                 if not col:
+                    logger.debug(f"No column found for placeholder: {field_raw}")
                     continue
+
                 val = get_value_for_field(row, col)
+                logger.info(f"Processing image placeholder '{field_raw}' (column: '{col}') with value: '{val}' and site: '{site_identifier}'")
+
+                img_path = None
+
                 if is_image_path(val):
                     img_path = find_image_path_enhanced(val, images_dir, site_identifier)
                     if img_path:
-                        for p in shape.text_frame.paragraphs:
-                            for r in p.runs:
-                                r.text = r.text.replace(f"{{{{{field_raw}}}}}", "", 1)
-                        left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                        sp = shape._element
-                        sp.getparent().remove(sp)
-                        slide = shape.part.slide
-                        slide.shapes.add_picture(img_path, left, top, width=width, height=height)
-                        return
+                        logger.info(f"Found image via file path: {img_path}")
+                elif site_identifier:
+                    logger.info(f"Cell value is not an image path, trying folder lookup for site: {site_identifier}")
+                    folder_path = find_folder_for_site(site_identifier, images_dir)
+                    if folder_path:
+                        img_path = get_first_image_from_folder(folder_path)
+                        if img_path:
+                            logger.info(f"Found image via site folder: {img_path}")
+                        else:
+                            logger.warning(f"Site folder found but no images inside: {folder_path}")
+                    else:
+                        logger.warning(f"No folder found for site: {site_identifier}")
+                else:
+                    logger.warning(f"No image path in cell and no site identifier for placeholder: {field_raw}")
+
+                if img_path:
+                    for p in shape.text_frame.paragraphs:
+                        for r in p.runs:
+                            r.text = r.text.replace(f"{{{{{field_raw}}}}}", "", 1)
+                    left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                    sp = shape._element
+                    sp.getparent().remove(sp)
+                    slide = shape.part.slide
+                    slide.shapes.add_picture(img_path, left, top, width=width, height=height)
+                    logger.info(f"Successfully inserted image for placeholder: {field_raw}")
+                    return
+                else:
+                    logger.warning(f"No image found for placeholder: {field_raw}")
     except Exception as e:
         logger.error(f"Error in replace_images_on_shape: {str(e)}")
 
@@ -329,14 +354,28 @@ async def generate(
                     zip_ref.extractall(images_dir)
                 logger.info(f"Extracted images to: {images_dir}")
 
+                folders = [item for item in os.listdir(images_dir) if os.path.isdir(os.path.join(images_dir, item))]
+                files = [item for item in os.listdir(images_dir) if os.path.isfile(os.path.join(images_dir, item))]
+                logger.info(f"ZIP structure - Folders: {folders}")
+                logger.info(f"ZIP structure - Root files: {files}")
+
             df = pd.read_excel(excel_path)
             df.columns = [col.strip() for col in df.columns]
+            logger.info(f"Excel columns: {list(df.columns)}")
 
             if not site_column:
                 for col in df.columns:
                     if 'site' in col.lower() or 'name' in col.lower():
                         site_column = col
+                        logger.info(f"Auto-detected site column: '{site_column}'")
                         break
+            else:
+                logger.info(f"Using provided site column: '{site_column}'")
+
+            if site_column and site_column in df.columns:
+                logger.info(f"Site values in data: {df[site_column].tolist()}")
+            else:
+                logger.warning("No site column detected or column not found in data")
 
             prs = Presentation(ppt_path)
 
@@ -349,6 +388,7 @@ async def generate(
                 site_id = None
                 if site_column and site_column in row.index:
                     site_id = get_value_for_field(row, site_column)
+                    logger.info(f"Slide {i}: Processing site '{site_id}'")
 
                 for shape in slide.shapes:
                     replace_images_on_shape(shape, row, images_dir if images else tmpdir, site_id)
