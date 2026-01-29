@@ -515,14 +515,47 @@ async def validate(excel: UploadFile = File(...), images: UploadFile = File(None
 
             if images:
                 zip_path = os.path.join(tmpdir, images.filename or "images.zip")
+                images_content = await images.read()
                 with open(zip_path, "wb") as f:
-                    f.write(await images.read())
+                    f.write(images_content)
 
+                # Use same logic as generate endpoint to detect site column
                 site_column = None
-                for col in df.columns:
-                    if 'site' in col.lower() or 'name' in col.lower() or 'id' in col.lower():
-                        site_column = col
+                priority_keywords = [
+                    ['site number', 'site_number'],  # Highest priority
+                    ['number'],  # Number column
+                    ['site name', 'site_name'],  # Site names
+                    ['address', 'city', 'town'],  # Location identifiers
+                    ['name', 'site', 'id']  # Generic fallback
+                ]
+
+                # Try each priority group and find the first column with good uniqueness
+                for keyword_group in priority_keywords:
+                    for col in df.columns:
+                        col_lower = col.lower()
+                        for keyword in keyword_group:
+                            if keyword in col_lower:
+                                unique_values = df[col].dropna().unique()
+                                unique_ratio = len(unique_values) / len(df[col].dropna()) if len(df[col].dropna()) > 0 else 0
+
+                                logger.info(f"Validation - evaluating '{col}': unique ratio {unique_ratio:.2f}")
+
+                                # Accept columns with at least 30% uniqueness
+                                if unique_ratio > 0.3:
+                                    site_column = col
+                                    logger.info(f"Validation - detected site column: '{site_column}' (unique ratio: {unique_ratio:.2f})")
+                                    break
+                        if site_column:
+                            break
+                    if site_column:
                         break
+
+                if not site_column:
+                    for col in df.columns:
+                        if 'site' in col.lower() or 'name' in col.lower():
+                            site_column = col
+                            logger.info(f"Validation - using fallback column: '{site_column}'")
+                            break
 
                 validation = validate_zip_structure(zip_path, df, site_column)
                 result["images"] = validation
@@ -553,10 +586,12 @@ async def generate(
             with open(ppt_path, "wb") as f:
                 f.write(await ppt.read())
 
+            images_content = None
             if images:
+                images_content = await images.read()
                 zip_path = os.path.join(tmpdir, images.filename or "images.zip")
                 with open(zip_path, "wb") as f:
-                    f.write(await images.read())
+                    f.write(images_content)
                 with zipfile.ZipFile(zip_path, "r") as zip_ref:
                     zip_ref.extractall(images_dir)
                 logger.info(f"Extracted images to: {images_dir}")
@@ -571,11 +606,45 @@ async def generate(
             logger.info(f"Excel columns: {list(df.columns)}")
 
             if not site_column:
-                for col in df.columns:
-                    if 'site' in col.lower() or 'name' in col.lower():
-                        site_column = col
-                        logger.info(f"Auto-detected site column: '{site_column}'")
+                # Try to find the best column for site identification
+                # Priority: site number (most unique) > site name > address/city > generic
+                priority_keywords = [
+                    ['site number', 'site_number'],  # Highest priority - most unique identifiers
+                    ['number'],  # Number column
+                    ['site name', 'site_name'],  # Site names
+                    ['address', 'city', 'town'],  # Location-based identifiers
+                    ['name', 'site', 'id']  # Generic fallback
+                ]
+
+                # Try each priority group and find the first column with good uniqueness
+                for keyword_group in priority_keywords:
+                    for col in df.columns:
+                        col_lower = col.lower()
+                        for keyword in keyword_group:
+                            if keyword in col_lower:
+                                # Check uniqueness
+                                unique_values = df[col].dropna().unique()
+                                unique_ratio = len(unique_values) / len(df[col].dropna()) if len(df[col].dropna()) > 0 else 0
+
+                                logger.info(f"Evaluating column '{col}' - unique ratio: {unique_ratio:.2f}")
+
+                                # Accept columns with at least 30% uniqueness
+                                if unique_ratio > 0.3:
+                                    site_column = col
+                                    logger.info(f"✓ Auto-detected site column: '{site_column}' (unique ratio: {unique_ratio:.2f})")
+                                    break
+                        if site_column:
+                            break
+                    if site_column:
                         break
+
+                if not site_column:
+                    # Last resort - use first column with 'site' or 'name'
+                    for col in df.columns:
+                        if 'site' in col.lower() or 'name' in col.lower():
+                            site_column = col
+                            logger.warning(f"Using fallback site column: '{site_column}'")
+                            break
             else:
                 logger.info(f"Using provided site column: '{site_column}'")
 
@@ -587,6 +656,9 @@ async def generate(
             prs = Presentation(ppt_path)
 
             logger.info("Processing slides – Step 1: Images")
+            logger.info(f"Site column being used: '{site_column}'")
+            logger.info(f"Site values in data: {df[site_column].tolist() if site_column and site_column in df.columns else 'None'}")
+
             for i, row in df.iterrows():
                 if i >= len(prs.slides):
                     break
@@ -595,7 +667,19 @@ async def generate(
                 site_id = None
                 if site_column and site_column in row.index:
                     site_id = get_value_for_field(row, site_column)
-                    logger.info(f"Slide {i}: Processing site '{site_id}'")
+                    logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    logger.info(f"Slide {i}: Processing site '{site_id}' (from column '{site_column}')")
+
+                    # Check if folder exists for this site
+                    if images:
+                        test_folder = find_folder_for_site(site_id, images_dir)
+                        if test_folder:
+                            logger.info(f"✓ Found matching folder: {os.path.basename(test_folder)}")
+                        else:
+                            logger.warning(f"✗ No folder found matching '{site_id}'")
+                            # List available folders to help debug
+                            available_folders = [f for f in os.listdir(images_dir) if os.path.isdir(os.path.join(images_dir, f))]
+                            logger.warning(f"Available folders: {available_folders}")
 
                 for shape in slide.shapes:
                     replace_images_on_shape(shape, row, images_dir if images else tmpdir, site_id)
