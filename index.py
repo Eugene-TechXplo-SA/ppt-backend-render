@@ -14,6 +14,7 @@ import io
 from urllib.parse import urlparse
 from typing import Dict, List, Optional, Tuple
 import unicodedata
+from difflib import SequenceMatcher
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,14 +29,54 @@ app.add_middleware(
 )
 
 def normalize_name(name: str) -> str:
-    """Normalize a name for flexible matching: lowercase, remove special chars, normalize spaces."""
+    """Normalize a name for flexible matching: lowercase, remove special chars and ALL spaces."""
     if not name:
         return ""
     normalized = unicodedata.normalize('NFKD', name)
     normalized = normalized.encode('ASCII', 'ignore').decode('ASCII')
     normalized = re.sub(r'[^a-zA-Z0-9\s]', '', normalized)
-    normalized = re.sub(r'\s+', ' ', normalized)
-    return normalized.strip().lower()
+    normalized = re.sub(r'\s+', '', normalized)
+    return normalized.lower()
+
+def find_best_column_match(field_name: str, columns: List[str], threshold: float = 0.85) -> Optional[str]:
+    """
+    Find the best matching column for a field name.
+    First tries exact normalized match, then falls back to fuzzy matching.
+
+    Args:
+        field_name: The field name from the placeholder
+        columns: List of available column names
+        threshold: Minimum similarity ratio for fuzzy matching (0-1)
+
+    Returns:
+        The best matching column name, or None if no good match found
+    """
+    field_normalized = normalize_name(field_name)
+
+    # Try exact normalized match first
+    for col in columns:
+        if normalize_name(col) == field_normalized:
+            logger.debug(f"Exact match found: '{field_name}' -> '{col}'")
+            return col
+
+    # Fall back to fuzzy matching
+    best_match = None
+    best_ratio = 0.0
+
+    for col in columns:
+        col_normalized = normalize_name(col)
+        ratio = SequenceMatcher(None, field_normalized, col_normalized).ratio()
+
+        if ratio > best_ratio and ratio >= threshold:
+            best_ratio = ratio
+            best_match = col
+
+    if best_match:
+        logger.info(f"Fuzzy match found: '{field_name}' -> '{best_match}' (similarity: {best_ratio:.2%})")
+    else:
+        logger.debug(f"No match found for: '{field_name}'")
+
+    return best_match
 
 def calculate_fit_dimensions(img_path: str, shape_width: int, shape_height: int, shape_left: int, shape_top: int) -> Tuple[int, int, int, int]:
     """
@@ -371,9 +412,8 @@ def replace_text_in_obj(obj, row, images_dir, site_identifier=None):
                     matches = placeholder_pattern.findall(run.text)
                     for field_raw in matches:
                         field_clean = re.sub(r'\s+', ' ', field_raw.strip())
-                        field_key = field_clean.lower()
 
-                        col = next((c for c in row.index if c.strip().lower() == field_key), None)
+                        col = find_best_column_match(field_clean, row.index.tolist())
                         if not col:
                             continue
                         val = get_value_for_field(row, col)
@@ -418,8 +458,8 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
             matches = placeholder_pattern.findall(full_text)
             for field_raw in matches:
                 field_clean = re.sub(r'\s+', ' ', field_raw.strip())
-                field_key = field_clean.lower()
-                col = next((c for c in row.index if c.strip().lower() == field_key), None)
+
+                col = find_best_column_match(field_clean, row.index.tolist())
                 if not col:
                     logger.debug(f"No column found for placeholder: {field_raw}")
                     continue
