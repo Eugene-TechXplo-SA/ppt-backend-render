@@ -90,7 +90,8 @@ def extract_images_from_excel(excel_path: str, output_dir: str) -> Dict[int, Dic
     extracted_images = {}
 
     try:
-        wb = load_workbook(excel_path)
+        # Try loading with data_only=False to get drawing objects
+        wb = load_workbook(excel_path, data_only=False)
         ws = wb.active
 
         # Get column names from first row (matching pandas read_excel behavior)
@@ -100,10 +101,35 @@ def extract_images_from_excel(excel_path: str, output_dir: str) -> Dict[int, Dic
             column_names.append(col_name)
 
         logger.info(f"Excel columns from openpyxl: {column_names}")
-        logger.info(f"Found {len(ws._images)} embedded images in Excel")
 
-        if len(ws._images) == 0:
-            logger.warning("No embedded images found in Excel file. Images must be inserted/embedded in cells, not just linked.")
+        # Check for images in multiple ways
+        image_count = len(ws._images) if hasattr(ws, '_images') else 0
+        logger.info(f"Found {image_count} embedded images in worksheet._images")
+
+        # Also check if there are any drawing objects
+        if hasattr(ws, '_charts'):
+            logger.info(f"Found {len(ws._charts)} chart objects")
+        if hasattr(ws, '_rels'):
+            logger.info(f"Worksheet has {len(ws._rels)} relationships")
+
+        if image_count == 0:
+            logger.warning("=" * 80)
+            logger.warning("NO EMBEDDED IMAGES FOUND IN EXCEL FILE")
+            logger.warning("=" * 80)
+            logger.warning("Possible reasons:")
+            logger.warning("1. Images are not embedded - they might be:")
+            logger.warning("   - Hyperlinks to image files (not actual embedded images)")
+            logger.warning("   - Text like 'Picture' instead of actual images")
+            logger.warning("   - Online/linked pictures (not embedded)")
+            logger.warning("2. Excel file format issue:")
+            logger.warning("   - File must be saved as .xlsx format")
+            logger.warning("   - Try: Save As → Excel Workbook (.xlsx)")
+            logger.warning("3. How to properly embed images:")
+            logger.warning("   - Click the cell where you want the image")
+            logger.warning("   - Go to Insert → Pictures → This Device")
+            logger.warning("   - Select image file and click Insert")
+            logger.warning("   - The image should appear overlaid on the spreadsheet")
+            logger.warning("=" * 80)
             wb.close()
             return extracted_images
 
