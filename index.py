@@ -7,7 +7,7 @@ import zipfile
 import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from PIL import Image
+from PIL import Image as PILImage
 import re
 import logging
 import io
@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 from typing import Dict, List, Optional, Tuple
 import unicodedata
 from difflib import SequenceMatcher
+from openpyxl import load_workbook
+from openpyxl.drawing.image import Image as OpenpyxlImage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,13 +80,82 @@ def find_best_column_match(field_name: str, columns: List[str], threshold: float
 
     return best_match
 
+def extract_images_from_excel(excel_path: str, output_dir: str) -> Dict[str, Dict[str, str]]:
+    """
+    Extract embedded images from Excel cells and save them to output_dir.
+    Returns a dict mapping (row_index, column_name) to image file paths.
+
+    Structure: {row_index: {column_name: image_path}}
+    """
+    extracted_images = {}
+
+    try:
+        wb = load_workbook(excel_path)
+        ws = wb.active
+
+        # Get column names from first row
+        column_names = []
+        for cell in ws[1]:
+            column_names.append(str(cell.value).strip() if cell.value else "")
+
+        logger.info(f"Found {len(ws._images)} embedded images in Excel")
+
+        # Extract images from worksheet
+        for idx, image in enumerate(ws._images):
+            try:
+                # Get the anchor information to determine which cell the image is in
+                if hasattr(image, 'anchor') and hasattr(image.anchor, '_from'):
+                    anchor = image.anchor._from
+                    row_idx = anchor.row  # 0-based row index
+                    col_idx = anchor.col  # 0-based column index
+
+                    # Skip header row (row 0)
+                    if row_idx == 0:
+                        continue
+
+                    # Convert to pandas row index (0-based, excluding header)
+                    pandas_row_idx = row_idx - 1
+
+                    if col_idx < len(column_names):
+                        column_name = column_names[col_idx]
+
+                        # Save the image
+                        image_data = image._data()
+                        img_ext = image.format.lower() if hasattr(image, 'format') else 'png'
+                        img_filename = f"row_{pandas_row_idx}_col_{col_idx}_{idx}.{img_ext}"
+                        img_path = os.path.join(output_dir, img_filename)
+
+                        with open(img_path, 'wb') as f:
+                            f.write(image_data)
+
+                        # Store in nested dict structure
+                        if pandas_row_idx not in extracted_images:
+                            extracted_images[pandas_row_idx] = {}
+
+                        extracted_images[pandas_row_idx][column_name] = img_path
+
+                        logger.info(f"Extracted image from row {pandas_row_idx}, column '{column_name}' -> {img_filename}")
+                    else:
+                        logger.warning(f"Image at col_idx {col_idx} exceeds column count {len(column_names)}")
+            except Exception as e:
+                logger.error(f"Error extracting image {idx}: {str(e)}")
+                continue
+
+        wb.close()
+        logger.info(f"Successfully extracted {sum(len(cols) for cols in extracted_images.values())} images from Excel")
+
+    except Exception as e:
+        logger.error(f"Error in extract_images_from_excel: {str(e)}")
+
+    return extracted_images
+
 def calculate_fit_dimensions(img_path: str, shape_width: int, shape_height: int, shape_left: int, shape_top: int) -> Tuple[int, int, int, int]:
     """
     Calculate dimensions and position to fit an image within a shape while maintaining aspect ratio.
     Returns: (left, top, width, height) for the fitted image.
     """
     try:
-        with Image.open(img_path) as img:
+        with PILImage.open(img_path) as img:
             img_width, img_height = img.size
 
         # Calculate aspect ratios
@@ -450,7 +521,7 @@ def replace_text_in_obj(obj, row, images_dir, site_identifier=None):
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
 
-def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
+def replace_images_on_shape(shape, row, images_dir, site_identifier=None, embedded_images=None, row_index=None):
     placeholder_pattern = re.compile(r"\{\{\s*(.*?)\s*\}\}")
     try:
         if hasattr(shape, "has_text_frame") and shape.has_text_frame:
@@ -478,36 +549,44 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None):
 
                 img_path = None
 
-                is_placeholder_text = val and '{{' in str(val) and '}}' in str(val)
-                is_empty_or_placeholder = not val or is_placeholder_text
+                # Priority 1: Check for embedded images in Excel
+                if embedded_images and row_index is not None and row_index in embedded_images:
+                    if col in embedded_images[row_index]:
+                        img_path = embedded_images[row_index][col]
+                        logger.info(f"Found embedded image from Excel cell: {img_path}")
 
-                if is_image_path(val) and not is_placeholder_text:
-                    img_path = find_image_path_enhanced(val, images_dir, site_identifier, image_type)
-                    if img_path:
-                        logger.info(f"Found image via file path: {img_path}")
-                elif is_empty_or_placeholder and site_identifier:
-                    logger.info(f"Cell is empty/placeholder for image column, trying subfolder lookup for site: {site_identifier} (type: {image_type})")
-                    folder_path = find_folder_for_site(site_identifier, images_dir)
-                    if folder_path:
-                        # Try subfolder structure first
-                        if image_type != 'unknown':
-                            img_path = get_image_from_subfolder(folder_path, image_type)
-                            if img_path:
-                                logger.info(f"Found image via subfolder (type: {image_type}): {img_path}")
-                            else:
-                                logger.info(f"No subfolder found for type '{image_type}', trying legacy structure")
+                # Priority 2: Check for file path in cell value
+                if not img_path:
+                    is_placeholder_text = val and '{{' in str(val) and '}}' in str(val)
+                    is_empty_or_placeholder = not val or is_placeholder_text
 
-                        # Fall back to legacy structure if subfolder approach didn't work
-                        if not img_path:
-                            img_path = get_first_image_from_folder(folder_path)
-                            if img_path:
-                                logger.info(f"Found image via legacy folder structure: {img_path}")
-                            else:
-                                logger.warning(f"Site folder found but no images inside: {folder_path}")
+                    if is_image_path(val) and not is_placeholder_text:
+                        img_path = find_image_path_enhanced(val, images_dir, site_identifier, image_type)
+                        if img_path:
+                            logger.info(f"Found image via file path: {img_path}")
+                    elif is_empty_or_placeholder and site_identifier and images_dir and os.path.exists(images_dir):
+                        logger.info(f"Cell is empty/placeholder for image column, trying subfolder lookup for site: {site_identifier} (type: {image_type})")
+                        folder_path = find_folder_for_site(site_identifier, images_dir)
+                        if folder_path:
+                            # Try subfolder structure first
+                            if image_type != 'unknown':
+                                img_path = get_image_from_subfolder(folder_path, image_type)
+                                if img_path:
+                                    logger.info(f"Found image via subfolder (type: {image_type}): {img_path}")
+                                else:
+                                    logger.info(f"No subfolder found for type '{image_type}', trying legacy structure")
+
+                            # Fall back to legacy structure if subfolder approach didn't work
+                            if not img_path:
+                                img_path = get_first_image_from_folder(folder_path)
+                                if img_path:
+                                    logger.info(f"Found image via legacy folder structure: {img_path}")
+                                else:
+                                    logger.warning(f"Site folder found but no images inside: {folder_path}")
+                        else:
+                            logger.warning(f"No folder found for site: {site_identifier}")
                     else:
-                        logger.warning(f"No folder found for site: {site_identifier}")
-                else:
-                    logger.debug(f"Cell has non-image value: {val}")
+                        logger.debug(f"Cell has non-image value: {val}")
 
                 if img_path:
                     for p in shape.text_frame.paragraphs:
@@ -645,6 +724,12 @@ async def generate(
             df.columns = [col.strip() for col in df.columns]
             logger.info(f"Excel columns: {list(df.columns)}")
 
+            # Extract embedded images from Excel
+            embedded_images_dir = os.path.join(tmpdir, "embedded_images")
+            os.makedirs(embedded_images_dir, exist_ok=True)
+            embedded_images = extract_images_from_excel(excel_path, embedded_images_dir)
+            logger.info(f"Extracted {sum(len(cols) for cols in embedded_images.values())} embedded images from Excel")
+
             if not site_column:
                 # Try to find the best column for site identification
                 # Priority: site number (most unique) > site name > address/city > generic
@@ -722,11 +807,11 @@ async def generate(
                             logger.warning(f"Available folders: {available_folders}")
 
                 for shape in slide.shapes:
-                    replace_images_on_shape(shape, row, images_dir if images else tmpdir, site_id)
+                    replace_images_on_shape(shape, row, images_dir if images else tmpdir, site_id, embedded_images, i)
                     if hasattr(shape, "table"):
                         for row_cells in shape.table.rows:
                             for cell in row_cells.cells:
-                                replace_images_on_shape(cell, row, images_dir if images else tmpdir, site_id)
+                                replace_images_on_shape(cell, row, images_dir if images else tmpdir, site_id, embedded_images, i)
 
             logger.info("Processing slides – Step 2: Text")
             for i, row in df.iterrows():
