@@ -80,7 +80,7 @@ def find_best_column_match(field_name: str, columns: List[str], threshold: float
 
     return best_match
 
-def extract_images_from_excel(excel_path: str, output_dir: str) -> Dict[str, Dict[str, str]]:
+def extract_images_from_excel(excel_path: str, output_dir: str) -> Dict[int, Dict[str, str]]:
     """
     Extract embedded images from Excel cells and save them to output_dir.
     Returns a dict mapping (row_index, column_name) to image file paths.
@@ -93,12 +93,19 @@ def extract_images_from_excel(excel_path: str, output_dir: str) -> Dict[str, Dic
         wb = load_workbook(excel_path)
         ws = wb.active
 
-        # Get column names from first row
+        # Get column names from first row (matching pandas read_excel behavior)
         column_names = []
         for cell in ws[1]:
-            column_names.append(str(cell.value).strip() if cell.value else "")
+            col_name = str(cell.value).strip() if cell.value else ""
+            column_names.append(col_name)
 
+        logger.info(f"Excel columns from openpyxl: {column_names}")
         logger.info(f"Found {len(ws._images)} embedded images in Excel")
+
+        if len(ws._images) == 0:
+            logger.warning("No embedded images found in Excel file. Images must be inserted/embedded in cells, not just linked.")
+            wb.close()
+            return extracted_images
 
         # Extract images from worksheet
         for idx, image in enumerate(ws._images):
@@ -106,11 +113,14 @@ def extract_images_from_excel(excel_path: str, output_dir: str) -> Dict[str, Dic
                 # Get the anchor information to determine which cell the image is in
                 if hasattr(image, 'anchor') and hasattr(image.anchor, '_from'):
                     anchor = image.anchor._from
-                    row_idx = anchor.row  # 0-based row index
+                    row_idx = anchor.row  # 0-based row index in openpyxl
                     col_idx = anchor.col  # 0-based column index
+
+                    logger.info(f"Image {idx}: anchor at row={row_idx}, col={col_idx}")
 
                     # Skip header row (row 0)
                     if row_idx == 0:
+                        logger.info(f"Image {idx} is in header row, skipping")
                         continue
 
                     # Convert to pandas row index (0-based, excluding header)
@@ -128,24 +138,41 @@ def extract_images_from_excel(excel_path: str, output_dir: str) -> Dict[str, Dic
                         with open(img_path, 'wb') as f:
                             f.write(image_data)
 
-                        # Store in nested dict structure
+                        # Store in nested dict structure with all possible column name variations
                         if pandas_row_idx not in extracted_images:
                             extracted_images[pandas_row_idx] = {}
 
+                        # Store with exact column name
                         extracted_images[pandas_row_idx][column_name] = img_path
 
-                        logger.info(f"Extracted image from row {pandas_row_idx}, column '{column_name}' -> {img_filename}")
+                        # Also store with normalized column name for better matching
+                        normalized_col = column_name.strip()
+                        if normalized_col != column_name:
+                            extracted_images[pandas_row_idx][normalized_col] = img_path
+
+                        logger.info(f"✓ Extracted image from row {pandas_row_idx}, column '{column_name}' -> {img_filename}")
                     else:
                         logger.warning(f"Image at col_idx {col_idx} exceeds column count {len(column_names)}")
+                else:
+                    logger.warning(f"Image {idx} has no anchor information")
             except Exception as e:
                 logger.error(f"Error extracting image {idx}: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
                 continue
 
         wb.close()
-        logger.info(f"Successfully extracted {sum(len(cols) for cols in extracted_images.values())} images from Excel")
+        total_extracted = sum(len(cols) for cols in extracted_images.values())
+        logger.info(f"Successfully extracted {total_extracted} images from Excel")
+
+        # Log the structure for debugging
+        for row_idx, cols in extracted_images.items():
+            logger.info(f"Row {row_idx}: {list(cols.keys())}")
 
     except Exception as e:
         logger.error(f"Error in extract_images_from_excel: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
 
     return extracted_images
 
@@ -550,10 +577,24 @@ def replace_images_on_shape(shape, row, images_dir, site_identifier=None, embedd
                 img_path = None
 
                 # Priority 1: Check for embedded images in Excel
-                if embedded_images and row_index is not None and row_index in embedded_images:
-                    if col in embedded_images[row_index]:
-                        img_path = embedded_images[row_index][col]
-                        logger.info(f"Found embedded image from Excel cell: {img_path}")
+                if embedded_images and row_index is not None:
+                    logger.info(f"Checking for embedded image at row {row_index}, column '{col}'")
+                    logger.info(f"Available embedded images for row {row_index}: {embedded_images.get(row_index, {}).keys() if row_index in embedded_images else 'None'}")
+
+                    if row_index in embedded_images:
+                        # Try exact match first
+                        if col in embedded_images[row_index]:
+                            img_path = embedded_images[row_index][col]
+                            logger.info(f"✓ Found embedded image from Excel cell (exact match): {img_path}")
+                        else:
+                            # Try fuzzy matching on embedded image column names
+                            for emb_col in embedded_images[row_index].keys():
+                                if normalize_name(col) == normalize_name(emb_col):
+                                    img_path = embedded_images[row_index][emb_col]
+                                    logger.info(f"✓ Found embedded image from Excel cell (normalized match '{col}' -> '{emb_col}'): {img_path}")
+                                    break
+                    else:
+                        logger.info(f"No embedded images found for row {row_index}")
 
                 # Priority 2: Check for file path in cell value
                 if not img_path:
@@ -722,13 +763,22 @@ async def generate(
 
             df = pd.read_excel(excel_path)
             df.columns = [col.strip() for col in df.columns]
-            logger.info(f"Excel columns: {list(df.columns)}")
+            logger.info(f"Pandas DataFrame columns: {list(df.columns)}")
+            logger.info(f"DataFrame has {len(df)} rows")
 
             # Extract embedded images from Excel
             embedded_images_dir = os.path.join(tmpdir, "embedded_images")
             os.makedirs(embedded_images_dir, exist_ok=True)
             embedded_images = extract_images_from_excel(excel_path, embedded_images_dir)
             logger.info(f"Extracted {sum(len(cols) for cols in embedded_images.values())} embedded images from Excel")
+
+            # Log the embedded images structure for debugging
+            if embedded_images:
+                logger.info("Embedded images structure:")
+                for row_idx, cols in embedded_images.items():
+                    logger.info(f"  Row {row_idx}: columns {list(cols.keys())}")
+            else:
+                logger.warning("No embedded images extracted from Excel")
 
             if not site_column:
                 # Try to find the best column for site identification
