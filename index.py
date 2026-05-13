@@ -616,7 +616,9 @@ def replace_text_in_obj(obj, row, images_dir, site_identifier=None):
                                 logger.error(f"Failed to process link: {str(e)}")
                         # =========================================================================
 
+                        # Normal text replacement
                         escaped = re.escape(f"{{{{{field_raw}}}}}")
+                        flexible = (
                             escaped
                             .replace('\\{\\{', r'\s*\{\{\s*')
                             .replace('\\}\\}', r'\s*\}\}')
@@ -640,10 +642,8 @@ def replace_text_in_obj(obj, row, images_dir, site_identifier=None):
                                 pass
 
                         run.text = run.text.replace(placeholder_text, val, 1)
-
     except Exception as e:
         logger.error(f"Error in replace_text_in_obj: {str(e)}")
-
 def replace_images_on_shape(shape, row, images_dir, site_identifier=None, embedded_images=None, row_index=None):
     placeholder_pattern = re.compile(r"\{\{\s*(.*?)\s*\}\}")
     try:
