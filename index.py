@@ -29,21 +29,65 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
-# ====================== NEW: GOOGLE DRIVE + KMZ SUPPORT ======================
-def convert_to_direct_download_link(url: str) -> str:
-    """Automatically converts normal Google Drive link to direct download link"""
-    if not url or not isinstance(url, str):
-        return url
-    url = url.strip()
-    
-    match = re.search(r'/file/d/([a-zA-Z0-9_-]+)', url)
-    if match:
-        file_id = match.group(1)
-        direct_link = f"https://drive.google.com/uc?export=download&id={file_id}"
-        logger.info(f"Converted Google Drive link → {direct_link}")
-        return direct_link
-    return url
-# =========================================================================
+def replace_text_in_obj(obj, row, images_dir, site_identifier=None):
+    placeholder_pattern = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+    try:
+        if hasattr(obj, "text_frame") and obj.text_frame is not None:
+            for paragraph in obj.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    matches = placeholder_pattern.findall(run.text)
+                    for field_raw in matches:
+                        field_clean = re.sub(r'\s+', ' ', field_raw.strip())
+
+                        col = find_best_column_match(field_clean, row.index.tolist())
+                        if not col:
+                            continue
+                        val = get_value_for_field(row, col)
+
+                        if is_image_path(val):
+                            continue
+
+                        # ====================== NEW: KMZ + GOOGLE DRIVE SUPPORT ======================
+                        if (val.lower().endswith('.kmz') or 'drive.google.com' in val.lower()):
+                            try:
+                                direct_link = convert_to_direct_download_link(val)
+                                run.text = run.text.replace(f"{{{{{field_raw}}}}}", direct_link)
+                                run.font.color.rgb = RGBColor(0, 0, 255)
+                                run.font.underline = True
+                                logger.info(f"Added KMZ/Google Drive link: {direct_link}")
+                                continue
+                            except Exception as e:
+                                logger.error(f"Failed to process link: {str(e)}")
+                        # =========================================================================
+
+                        escaped = re.escape(f"{{{{{field_raw}}}}}")
+                        flexible = (
+                            escaped
+                            .replace('\\{\\{', r'\s*\{\{\s*')
+                            .replace('\\}\\}', r'\s*\}\}')
+                            .replace('\\-', r'[-–—]')
+                            .replace('\\ ', r'\s*')
+                        )
+                        match = re.search(flexible, run.text, re.UNICODE)
+                        if not match:
+                            continue
+                        placeholder_text = match.group(0)
+
+                        if col.lower().endswith("link"):
+                            try:
+                                result = urlparse(val)
+                                if all([result.scheme, result.netloc]):
+                                    run.text = run.text.replace(placeholder_text, val, 1)
+                                    run.font.color.rgb = RGBColor(0, 0, 255)
+                                    run.font.underline = True
+                                    continue
+                            except:
+                                pass
+
+                        run.text = run.text.replace(placeholder_text, val, 1)
+    except Exception as e:
+        logger.error(f"Error in replace_text_in_obj: {str(e)}")
+        
 def normalize_name(name: str) -> str:
     """Normalize a name for flexible matching: lowercase, remove special chars and ALL spaces."""
     if not name:
